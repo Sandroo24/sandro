@@ -810,7 +810,7 @@ const NET_VER := 17                                    # must match PROTO_VERSIO
 # THE OFFICIAL SERVER (where the big "Join game" button goes). Put your hosted relay here BEFORE exporting.
 # A browser build (itch.io) needs wss://your-domain  (plain ws:// is blocked on https pages). "" = no official server, offline practice lobby only.
 # !! This is a *quick tunnel* address: it dies whenever cloudflared / relay.py restarts and is different every time. For a release use a permanent https address (see server/DEPLOY.md), then re-export.
-const OFFICIAL_SERVER := "https://fighting-turn-century-agreement.trycloudflare.com"
+const OFFICIAL_SERVER := "wss://play.sandro24.space/"
 const DEFAULT_SERVER := OFFICIAL_SERVER               # what the private-room address box shows at first (type another relay's address to use it)
 const ONLINE_NATIONS := 24                            # nations in an online match (humans + bots), capped by the map's size
 const TURN_SECS := 0.1                                # one network turn = one attack step; every 5th turn is also an economy tick
