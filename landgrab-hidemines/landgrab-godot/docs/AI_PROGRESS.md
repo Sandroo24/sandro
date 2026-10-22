@@ -544,3 +544,46 @@ Stable checkpoint after the five items above; nothing half-written.
 1. Run the game, play to a crowded late game, check Output for errors and for "automatic quality level" lines.
 2. Tell me FPS / draw-call numbers (or whether it still lags and at which zoom) - then tune thresholds.
 3. Test on one phone (landscape): bottom bar width, popups, text size.
+
+
+---
+## Hosting fix pass (from landgrab-mobile-v4.zip)
+**Backups:** `server/relay.py.bak_v15` (old relay). Static/runtime checks: the relay was RUN here and tested with a real WebSocket client (health page, upgrade, public lobby, version mismatch,
+two players -> match start, commands). `main.gd` was only edited in 3 small spots (not run in Godot).
+- **Bug found and fixed (server): `relay.py` dropped every `nuke` command** (its command whitelist `INT_FIELDS` / `STR_FIELDS` had no `nuke` entry), so no Small Bomb / Nuke / Mega Bomb ever fired in an online match.
+  Test before: forwarded ['attack'] only; after: ['attack', 'nuke:atom', 'nuke:mega'].
+- `PROTO_VERSION` 15 -> **16** (relay.py) and `NET_VER` 15 -> **16** (main.gd): an old relay now answers "Version mismatch" instead of silently ignoring bombs. Re-export the game AND re-deploy relay.py.
+- **Likely reason it "does not work" when hosted:** `OFFICIAL_SERVER` in main.gd is a trycloudflare.com *quick tunnel* address (changes at every restart). Put a permanent https address there and re-export. See `server/DEPLOY.md`.
+- New: `server/check_server.py` (tests a hosted address like the game does and says what is wrong), `server/DEPLOY.md`, `server/Dockerfile`; the relay prints a hosting checklist at start, honours `HOST` / `PORT`;
+  the lobby note now shows which address it could not reach.
+- Not verified: your actual hosting setup (I cannot see it), the real Cloudflare / hosting-service proxy, TLS (check_server.py handles wss:// but I could only run it against ws:// locally), and the game in Godot / a browser.
+### Next
+1. On the machine that hosts: run `python relay.py`, then `python check_server.py <your public address>` and tell me the exact output if it is not "OK".
+2. Set `OFFICIAL_SERVER` to the permanent address, re-export the web build, re-upload.
+
+
+---
+## Fix pass v6 (from landgrab-mobile-v5.zip) - players, growth shape, boats, Mega Bomb
+**Backup:** `main.gd.bak_before_v6` (your v5 `main.gd`). **Status: written + statically checked (brackets, tabs, no variable redeclaration, no leftover references). NOT run in Godot.**
+The growth rule was tested in a Python simulation (old rule -> square, new rule -> round blob); the relay was run and tested with a real WebSocket client (it forwards `ally_ask` and `nuke`).
+
+1. **Alliances between real players.** Two causes: (a) `validate("ally_ask")` flatly refused human targets ("not available yet"); (b) the right-click menu only opened for `own[tile] > 1`, so it
+   never opened on slot 1 and also opened on your own land when you are not slot 1. Now: menu opens on every other living nation (`own > 0 and != my_slot`). Pressing **Make alliance** on a
+   human sends a *request* (2 min, `ALLY_REQ_TICKS`); the other player gets a 9 s message, and their menu button for you now reads **Accept alliance** - pressing it forms the alliance
+   (both sides' attacks on each other are cancelled). Your own button says "Request sent" meanwhile. Bots still answer at once (60%). **Cancel alliance** works for both.
+2. **Growth no longer looks like a cube.** The attack step took front tiles with 3 own neighbours first, then 2, then 1 - that fills corners first and grows squares. Now notch tiles still
+   go first, but all other front tiles are one random pool, and free-land growth prefers (75%) the tile nearer to the nation's centre out of two random candidates (per-nation centroid
+   kept in `Player.csx/csy` inside `_set_own`). Wars between nations use the random pool without the centre bias. All integer / `sim_rng`, so online clients stay identical.
+3. **Boats.** No port needed any more: the boat leaves from any water next to your coast (`_coast_waters`, sampled to ~1500 coast tiles). Attacking **free (unowned) land** by boat already worked in
+   the landing code and the left-click path - it was only blocked by the port check. AI nations still need a port to try boat landings (keeps the AI search cost as before).
+4. **Mega Bomb = nation strike.** Click a nation's land (not yours, not an ally's): at impact the game finds the radius around the impact tile that contains **85%** of that nation's tiles
+   (`MEGA_LAND_SHARE`, distance histogram, no sorting) and destroys exactly that nation's tiles inside it (other nations / free land in the circle are untouched). Those tiles become fallout, its buildings
+   there die, its troops drop by the same share. Ships / boats / mines are not touched. Small Bomb and Nuke are unchanged. The "85%" is the nearest tiles to the impact, so far-away islands can survive.
+5. **Protocol 17** (`NET_VER` in main.gd, `PROTO_VERSION` in server/relay.py, check_server.py, DEPLOY.md): the rules changed, so old builds / old relays are refused with a clear message. Re-export AND re-deploy the relay.
+
+### Not verified / risks
+- Not run in Godot or a browser. First run: watch the Output panel for parser errors; test with two phones/browsers: right-click (long-press) the other player, Make alliance -> Accept alliance.
+- The Mega Bomb impact does one pass over the whole map to find the crater (a short hitch, one time), then sweeps with the existing 3000-tiles-per-step budget.
+- Round growth is a bias, not a rule: coasts, mountains and neighbours still shape nations. If it is now too round, lower the 0.75 in `step_attack`; if you want it rounder, raise it.
+### Stopped at
+All five items implemented and saved; nothing half-written. Next: (1) test alliances between two real devices, (2) look at the new growth shape in play, (3) boat attack on free land from a coast without a port, (4) fire a Mega Bomb at a neighbour.

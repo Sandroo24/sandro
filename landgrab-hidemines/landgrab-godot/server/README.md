@@ -10,6 +10,8 @@ Settings (top of `relay.py`): `PUBLIC_OPEN_SLOTS`, `PUBLIC_MAPS` (take a map out
 Whenever you change gameplay, bump `PROTO_VERSION` here AND `NET_VER` in `main.gd` together.
 
 ## Hosting it for real (the last step)
+**Not connecting? Read `DEPLOY.md` and run `python check_server.py https://your-address` first.**
+
 Run `python3 relay.py` on any always-on box (a small VPS is enough) and put TLS in front, because an itch.io page is https and the browser only
 allows `wss://`. With Caddy that is the whole config (it handles the websocket upgrade and the certificate by itself):
 

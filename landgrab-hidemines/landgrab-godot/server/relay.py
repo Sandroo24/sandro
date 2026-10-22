@@ -28,7 +28,8 @@ import sys
 import time
 
 GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-PROTO_VERSION = 13
+PROTO_VERSION = 17
+SERVER_ID = "%04X" % random.randint(0, 0xFFFF)   # new on every start of the relay: players who see the same id are on the same server
 MAX_MSG = 64 * 1024            # biggest message a client may send
 MAX_HUMANS = 8                 # per room
 TURN_SECS = 0.1                # one turn = one attack step in the game
@@ -52,8 +53,9 @@ MAX_CONNS = 600                # connections (watchers + players) the server acc
 INT_FIELDS = {
     "attack": ["target"], "boat": ["tile"], "build": ["tile"], "sea": ["tile"], "ship": ["ship", "tile"], "shipatk": ["ship", "tgt"],
     "cancel": ["id"], "ally_ask": ["target"], "ally_cancel": ["target"], "trade_off": ["target"], "trade_on": ["target"], "pick": ["tile"],
+    "nuke": ["tile"],      # Small Bomb / Nuke / Mega Bomb (this type was MISSING before: every bomb command was silently dropped online)
 }
-STR_FIELDS = {"build": ["kind"], "sea": ["kind"]}
+STR_FIELDS = {"build": ["kind"], "sea": ["kind"], "nuke": ["kind"]}
 FRAC_TYPES = {"attack", "boat"}
 
 
@@ -343,7 +345,7 @@ class PublicLobby:
     def msg(self, c):
         return {"t": "pub", "seq": self.seq, "map": self.map_idx, "cap": self.cap, "next": self.next_idx,
                 "next_cap": self.next_cap, "left": int(self.left + 0.999), "open": PUBLIC_OPEN_SLOTS,
-                "humans": [p.name for p in self.players], "in": c in self.players,
+                "humans": [p.name for p in self.players], "in": c in self.players, "srv": SERVER_ID, "online": len(self.watchers),
                 "me": self.players.index(c) if c in self.players else -1, "last": self.last}
 
     def broadcast(self):
@@ -472,7 +474,7 @@ def handle(c, text):
         if c.joined or c.pub_watch or PUB is None:
             return
         if d.get("ver") != PROTO_VERSION:
-            c.send({"t": "err", "m": "Version mismatch: the server speaks protocol %d, this game build speaks %s. Update the game." % (PROTO_VERSION, d.get("ver"))})
+            c.send({"t": "err", "m": "Version mismatch: the server speaks protocol %d, this game build speaks %s. The older one must be updated: re-export the game, or re-deploy relay.py." % (PROTO_VERSION, d.get("ver"))})
             c.close()
             return
         PUB.watch(c)
@@ -489,7 +491,7 @@ def handle(c, text):
         if c.joined or c.pub_watch:
             return
         if d.get("ver") != PROTO_VERSION:
-            c.send({"t": "err", "m": "Version mismatch: the server speaks protocol %d, this game build speaks %s. Update both." % (PROTO_VERSION, d.get("ver"))})
+            c.send({"t": "err", "m": "Version mismatch: the server speaks protocol %d, this game build speaks %s. The older one must be updated: re-export the game, or re-deploy relay.py." % (PROTO_VERSION, d.get("ver"))})
             c.close()
             return
         name = sanitize_room(d.get("room"))
@@ -613,9 +615,11 @@ async def main():
     PUB = PublicLobby()
     asyncio.ensure_future(PUB.run())
     port = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT", "8765"))
-    server = await asyncio.start_server(on_client, "0.0.0.0", port, limit=2 ** 17)
+    host = os.environ.get("HOST", "0.0.0.0")
+    server = await asyncio.start_server(on_client, host, port, limit=2 ** 17)
     asyncio.ensure_future(pinger())
-    log("Landgrab relay listening on port", port, "(ws://localhost:%d)" % port,
+    log("Hosting checklist: (1) this process keeps running, (2) a wss:// address points at port %d, (3) OFFICIAL_SERVER in main.gd is exactly that address, (4) NET_VER in main.gd == %d. Test: python check_server.py <address>" % (port, PROTO_VERSION))
+    log("Landgrab relay SERVER", SERVER_ID, "protocol", PROTO_VERSION, "listening on port", port, "(ws://localhost:%d)" % port,
         "- public lobby: map", PUB.map_idx, "next", PUB.next_idx, "every", int(LOBBY_SECS), "s")
     async with server:
         await server.serve_forever()

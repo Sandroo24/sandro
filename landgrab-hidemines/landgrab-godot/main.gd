@@ -3,19 +3,32 @@ extends Node2D
 
 const TICK := 0.5                 # seconds per game tick - THE master speed knob (bigger = slower game)
 const ATK_TICK := 0.1              # attacks / expansion step: 10 per second, like OpenFront
+# PLAYER-vs-PLAYER fights only (taking free land is unchanged). Both are plain multipliers on the OpenFront-style numbers below:
+const ATK_LOSS_MULT := 0.65   # the attacker's troop loss for every tile it conquers (1.0 = before). Lower = attackers lose fewer troops for the same land.
+const ATK_SPEED_MULT := 1.6   # how fast an attack takes tiles (1.0 = before). Higher = the front advances faster for the same troop count.
+# Troop advantage = faster conquest. Without this an attacker with MORE than ~1.2x the defender's troops was no faster at all (500K against 10K
+# moved like 15K against 10K). Above ATK_ADV_START (attacker troops / defender troops) the speed grows with the logarithm of the advantage:
+# 1.5x troops about +14 %, 5x about +80 %, 10x about +120 %, and it never exceeds ATK_ADV_MAX (so: clearly faster, never instant).
+const ATK_ADV_START := 1.2
+const ATK_ADV_SLOPE := 0.4    # speed bonus per doubling of the advantage
+const ATK_ADV_MAX := 2.5      # the most the bonus can ever give (2.5 = two and a half times as fast)
 const ATK_FRONT_SPEED := 1.3       # tiles per second the front advances (measured from the reference video)
 const LOBBY_SECS := 120.0         # a lobby starts after this long, or as soon as it is full
 const LOBBY_OPEN_SLOTS := 2       # slots left free in every lobby (for the two testers); everyone else is a placeholder player
 const SPAWN_SECS := 25.0          # once a lobby starts the map is shown this long: everybody picks (and may change) their start
-const ACC := Color("f2b84b")
+const ACC := Color("d9ac4f")      # antique gold: the single accent of the whole UI
 const OUT := Color("2b1d10")
-# UI palette (one restrained set used everywhere): dark glass panels, soft white lines, gold as the single accent
-const UI_LINE := Color(1, 1, 1, 0.09)
-const UI_TEXT := Color("eaf1f6")
-const UI_MUTED := Color("8ea3b2")
-const UI_GOOD := Color("5fd28a")
-const UI_BAD := Color("ef6b5f")
-const UI_MARGIN := 12              # distance of every HUD panel from the window edge
+# Historical palette (atlas / campaign map): dark navy "ink" panels framed in brass, parchment text, forest green and burgundy for good / bad
+const UI_LINE := Color(0.85, 0.67, 0.31, 0.30)   # gilt hairline
+const UI_TEXT := Color("f0e4c4")                  # parchment
+const UI_MUTED := Color("a89873")                 # aged vellum
+const UI_GOOD := Color("86c382")                  # forest
+const UI_BAD := Color("e0705f")                   # burgundy, lifted so it reads on navy
+const UI_NAVY := Color(0.043, 0.075, 0.125, 0.93) # panel fill
+const UI_INK := Color("22160a")                   # dark brown ink (text on brass / parchment)
+const UI_BRASS := Color("a8843a")                 # frame lines
+const UI_BURGUNDY := Color(0.23, 0.09, 0.11, 0.97) # selected card fill
+const UI_MARGIN := 6              # distance of every HUD panel from the window edge
 const NAMES := ["You", "Aurelia", "Borea", "Calden", "Dorne", "Esker", "Fenmark", "Galt",
 	"Hollin", "Ister", "Juno", "Kessa", "Lorne", "Mirev", "Norra", "Ostel"]
 
@@ -48,6 +61,8 @@ const PRICE_CAP := 1000000        # OpenFront: city / port / factory cost 125K x
 const OF_TICKS_PER_ECON := 5.0    # OpenFront ticks every 0.1 s; our economy ticks every TICK (0.5 s)
 const GOLD_PER_OF_TICK := 100.0   # OpenFront: every player earns 100 gold per tick (bots 50) = +1000/s
 const WIN_SHARE := 0.8            # OpenFront: own 80% of the land to win
+# short names for the small cards (BUILD_LABEL stays the full name used in messages)
+const CARD_SHORT := {"silo": "Launcher", "mine": "Water Mine"}
 const BUILD_LABEL := {"village": "Village", "station": "Station", "port": "Port", "warship": "Warship", "mine": "Water Mine", "silo": "Bomb Launcher", "sam": "SAM Site", "atom": "Small Bomb", "nuke": "Nuke", "mega": "Mega Bomb"}
 const BUILD_TIP := {
 	"village": "Village: raises max troops. Click it again with this tool: Village -> City -> Duchy.",
@@ -59,7 +74,7 @@ const BUILD_TIP := {
 	"sam": "SAM Site (1.5M): shoots at enemy bombs that fly within 24 tiles of it (Small Bomb 80% hit chance, Nuke 55%, Mega Bomb 30%; 7.5 s reload). Build several to protect your base. Allies' bombs are never shot.",
 	"atom": "Small Bomb (750K): click a target. Everything within 5 tiles is destroyed; land up to 10 tiles away is hit at random. The land becomes nobody's and turns into a green fallout zone until somebody claims it. Needs a ready Bomb Launcher.",
 	"nuke": "Nuke (5M): click a target. Everything within 12 tiles is destroyed, land up to 24 tiles away is hit at random, and the land turns into a fallout zone. Needs a ready Bomb Launcher of level 2 or higher.",
-	"mega": "Mega Bomb (25M): a whole-map bomb - the blast covers about half the map's width around the target, everything inside is destroyed and left as fallout. Needs a ready Bomb Launcher of level 4.",
+	"mega": "Mega Bomb (25M): click a NATION's land. About 85% of that nation's land (the part nearest to the impact point) and the buildings on it are destroyed and turn into fallout; its troops drop by the same share. Cannot target yourself or an ally. Needs a ready Bomb Launcher of level 4.",
 }
 const PRICE_STEPS := 5            # price tiers: 1x, 2x, 3x, 4x, 5x the base price, then it stays at 5x
 
@@ -129,12 +144,13 @@ const BOMB_PRICE := {"atom": 750000, "nuke": 5000000, "mega": 25000000}    # pai
 const BOMB_NEED_LEVEL := {"atom": 1, "nuke": 2, "mega": 4}                 # Bomb Launcher level needed for each bomb
 const BOMB_INNER := {"atom": 5.0, "nuke": 12.0}    # tiles: every tile inside loses its owner and becomes fallout; buildings / units die
 const BOMB_OUTER := {"atom": 10.0, "nuke": 24.0}   # tiles: land between INNER and OUTER is hit at random (NUKE_RING_LOSS)
-const MEGA_RADIUS_FRAC := 0.5      # Mega Bomb: inner radius = this x the longer map side (0.5 = covers about the whole map when aimed at the middle; use 2.0 for a literal wipe of everything)
+const MEGA_LAND_SHARE := 0.85      # Mega Bomb: you pick a NATION; about this share of ITS land (the part nearest to the impact point) is destroyed
 const BOMB_SAM_HIT := {"atom": 0.80, "nuke": 0.55, "mega": 0.30}   # chance that one SAM shot stops the bomb
 const LAUNCHER_MAX := 4
 const LAUNCHER_UPGRADE_PRICE := [0, 0, 1500000, 2500000, 4000000]  # price to REACH that level (index = new level)
 const SILO_RELOAD_BY_LEVEL := [0, 600, 500, 400, 300]              # attack steps (0.1 s) between two launches, by launcher level
 const NUKE_SPEED := 0.6            # tiles per attack step (0.1 s) = 6 tiles/s: a 150-tile shot takes ~25 s
+const ALLY_REQ_TICKS := 240      # a human alliance request stands for 2 minutes (240 economy ticks of 0.5 s)
 const BLAST_TILE_BUDGET := 3000    # a blast changes at most this many tiles per attack step (0.1 s): a Mega Bomb then sweeps over the map in a few seconds instead of freezing the game
 const NUKE_RING_LOSS := 0.5
 const NUKE_TROOP_KILL := 1.0       # a hit nation loses this x (tiles lost / tiles owned) of its troops, on top of the lower troop cap
@@ -178,8 +194,8 @@ float box_dist(vec2 p, vec2 centre, vec2 half_size) {
 void fragment() {
     vec2 p = UV * vp_size;
     vec2 q = UV - vec2(0.5);
-    vec3 c_mid = vec3(0.066, 0.168, 0.243);
-    vec3 c_edge = vec3(0.028, 0.078, 0.124);
+    vec3 c_mid = vec3(0.052, 0.112, 0.178);
+    vec3 c_edge = vec3(0.022, 0.044, 0.080);
     float r = length(q * vec2(1.0, 0.85));
     vec3 col = mix(c_mid, c_edge, smoothstep(0.10, 0.85, r));
     float hz = vnoise(p * 0.004 + vec2(now * 0.004, 0.0)) * 0.6 + vnoise(p * 0.012 - vec2(0.0, now * 0.006)) * 0.4;
@@ -190,7 +206,7 @@ void fragment() {
     float d_sh = box_dist(p - vec2(4.0, 9.0), mc, hs);
     col *= 1.0 - 0.45 * (1.0 - smoothstep(0.0, 42.0, d_sh));
     float d0 = box_dist(p, mc, hs);
-    col = mix(col, vec3(0.30, 0.52, 0.62), 0.22 * (1.0 - smoothstep(0.0, 1.6, abs(d0))));
+    col = mix(col, vec3(0.72, 0.56, 0.26), 0.55 * (1.0 - smoothstep(0.0, 1.6, abs(d0))));   // brass frame line around the chart
     COLOR = vec4(col, 1.0);
 }
 """
@@ -397,7 +413,7 @@ void fragment() {
             }
             col *= 0.95 + 0.08 * lf;
             if (hl_owner > 0.5 && abs(me.x - hl_owner) < 0.5) {
-                col = mix(col, vec3(1.0), hl_amt * 0.16);   // the nation under the cursor
+                col = mix(col, vec3(1.0, 0.95, 0.80), hl_amt * 0.18);   // the nation under the cursor: warm lift
             }
             float ow = me.x;
             if (sel_owner > 0.5 && abs(ow - sel_owner) < 0.5) {
@@ -432,16 +448,16 @@ void fragment() {
             if (nd.y < 0.5) { sea_a = max(sea_a, ed); }
             float free_x = free_a * (1.0 - foe_a);
             float sea_x = sea_a * (1.0 - max(foe_a, free_a));
-            col = mix(col, vec3(1.0), 0.07 * sea_x);                  // coast: just a faint rim
-            col = mix(col, vec3(1.0), 0.26 * free_x);                 // border toward free land: light rim
-            col = mix(col, vec3(0.04, 0.06, 0.09), 0.42 * foe_a);     // border between two nations: crisp dark line
+            col = mix(col, vec3(0.97, 0.93, 0.80), 0.09 * sea_x);    // coast: just a faint warm rim
+            col = mix(col, vec3(0.98, 0.93, 0.76), 0.30 * free_x);    // border toward free land: light parchment rim
+            col = mix(col, vec3(0.09, 0.06, 0.04), 0.58 * foe_a);     // border between two nations: crisp dark-ink engraved line
             if (foe_a > 0.0) {
                 // active front: a border next to land that changed hands in the last few seconds glows warmly and pulses
                 float cf = max(recent(c), max(max(recent(c + ivec2(-1, 0)), recent(c + ivec2(1, 0))), max(recent(c + ivec2(0, -1)), recent(c + ivec2(0, 1)))));
                 col = mix(col, vec3(1.0, 0.70, 0.32), foe_a * cf * (0.40 + 0.16 * sin(now * 6.0 + fc.x * 0.35 + fc.y * 0.25)));
             }
             if (sel_owner > 0.5 && abs(ow - sel_owner) < 0.5) {
-                col = mix(col, vec3(1.0), 0.72 * sel_amt * max(foe_a, max(free_a, sea_a)));   // selected nation: bright outline
+                col = mix(col, vec3(1.0, 0.86, 0.45), 0.78 * sel_amt * max(foe_a, max(free_a, sea_a)));   // selected nation: antique-gold outline
             }
             // freshly conquered tiles flash for a moment (real capture, from the same timestamps as the animation)
             float age = now - texelFetch(time_tex, c, 0).r;
@@ -457,6 +473,8 @@ void fragment() {
     }
     // one soft light gradient over the whole map (upper left a little brighter)
     COLOR.rgb *= 1.04 - 0.07 * (UV.x * 0.5 + UV.y * 0.5);
+    // faint antique warmth over the whole chart
+    COLOR.rgb = mix(COLOR.rgb, COLOR.rgb * vec3(1.035, 1.0, 0.945), 0.55);
 }
 """
 
@@ -496,9 +514,97 @@ class Player:
 	var bought := {"village": 0, "station": 0, "port": 0, "warship": 0, "mine": 0, "silo": 0, "sam": 0, "atom": 0, "nuke": 0, "mega": 0}
 	var comps := {}     # landmass id -> number of tiles owned on it
 	var allies := {}    # player id -> true while an alliance with that player stands
+	var csx := 0        # sum of the x / y of every tile this nation owns (centroid = csx / tiles): used to grow round
+	var csy := 0
 
 
 # Small up/down arrow button (opens the sea-units menu above the Port card).
+# Engraved panel frame: navy ink fill, brass outer line, fine inner line, cut corners, two small gems. Drawn straight onto the canvas item.
+class HistBox extends StyleBox:
+	var fill := Color(0.043, 0.075, 0.125, 0.93)
+	var edge := Color("a8843a")
+	var inner := Color(0.85, 0.67, 0.31, 0.30)
+	var gem := Color("d9ac4f")
+	var cut := 4.0
+
+	func set_edge(c: Color) -> void:
+		if edge != c:
+			edge = c
+			emit_changed()
+
+	func _oct(r: Rect2, k: float) -> PackedVector2Array:
+		var x0 := r.position.x
+		var y0 := r.position.y
+		var x1 := r.end.x
+		var y1 := r.end.y
+		return PackedVector2Array([Vector2(x0 + k, y0), Vector2(x1 - k, y0), Vector2(x1, y0 + k), Vector2(x1, y1 - k), Vector2(x1 - k, y1), Vector2(x0 + k, y1), Vector2(x0, y1 - k), Vector2(x0, y0 + k)])
+
+	func _cols(c: Color, n: int) -> PackedColorArray:
+		var a := PackedColorArray()
+		a.resize(n)
+		a.fill(c)
+		return a
+
+	func _draw(ci: RID, rect: Rect2) -> void:
+		var o := _oct(rect, cut)
+		var sh := PackedVector2Array()
+		for q in o:
+			sh.append(q + Vector2(0.0, 2.0))
+		RenderingServer.canvas_item_add_polygon(ci, sh, _cols(Color(0, 0, 0, 0.26), sh.size()))
+		RenderingServer.canvas_item_add_polygon(ci, o, _cols(fill, o.size()))
+		var closed := o.duplicate()
+		closed.append(o[0])
+		RenderingServer.canvas_item_add_polyline(ci, closed, _cols(edge, closed.size()), 1.5, true)
+		var i2 := _oct(rect.grow(-3.5), maxf(cut - 2.0, 1.0))
+		i2.append(i2[0])
+		RenderingServer.canvas_item_add_polyline(ci, i2, _cols(inner, i2.size()), 1.0, true)
+		if rect.size.x > 60.0 and rect.size.y > 24.0:
+			for gy in [rect.position.y + 1.0, rect.end.y - 1.0]:
+				var c := Vector2(rect.position.x + rect.size.x * 0.5, gy)
+				var d := PackedVector2Array([c + Vector2(0.0, -2.6), c + Vector2(3.6, 0.0), c + Vector2(0.0, 2.6), c + Vector2(-3.6, 0.0)])
+				RenderingServer.canvas_item_add_polygon(ci, d, _cols(gem, 4))
+
+
+# A thin gilt rule with a small diamond in the middle (title underline).
+class HistRule extends Control:
+	var col := Color(0.85, 0.67, 0.31, 0.80)
+
+	func _init() -> void:
+		custom_minimum_size = Vector2(0, 10)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		var c := size * 0.5
+		draw_line(Vector2(size.x * 0.12, c.y), Vector2(c.x - 9.0, c.y), col, 1.0, true)
+		draw_line(Vector2(c.x + 9.0, c.y), Vector2(size.x * 0.88, c.y), col, 1.0, true)
+		draw_colored_polygon(PackedVector2Array([c + Vector2(0.0, -4.0), c + Vector2(5.0, 0.0), c + Vector2(0.0, 4.0), c + Vector2(-5.0, 0.0)]), col)
+		draw_colored_polygon(PackedVector2Array([c + Vector2(0.0, -2.0), c + Vector2(2.5, 0.0), c + Vector2(0.0, 2.0), c + Vector2(-2.5, 0.0)]), Color("22160a"))
+
+
+# Fallback cursor: the same image, drawn by the game on a top layer, used when the OS / browser cursor is unreliable (F7 toggles).
+class SoftCursor extends Control:
+	var main: Node
+	var tex_arrow: Texture2D
+	var tex_cross: Texture2D
+
+	func _init() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		size = Vector2(32, 32)
+
+	func _process(_d: float) -> void:
+		if not visible:
+			return
+		var cross := main != null and int(main.get("sel_ship")) != 0
+		position = get_viewport().get_mouse_position() - (Vector2(16, 16) if cross else Vector2(2, 2))
+		queue_redraw()
+
+	func _draw() -> void:
+		var cross := main != null and int(main.get("sel_ship")) != 0
+		var t: Texture2D = tex_cross if cross else tex_arrow
+		if t != null:
+			draw_texture(t, Vector2.ZERO)
+
+
 class ArrowBtn extends Button:
 	var open := false
 	func _draw() -> void:
@@ -506,7 +612,7 @@ class ArrowBtn extends Button:
 		var s := 5.0
 		var ay := 1.0 if open else -1.0
 		draw_colored_polygon(PackedVector2Array([
-			c + Vector2(-s * 1.4, -ay * s * 0.5), c + Vector2(s * 1.4, -ay * s * 0.5), c + Vector2(0, ay * s * 0.7)]), Color("f2b84b"))
+			c + Vector2(-s * 1.4, -ay * s * 0.5), c + Vector2(s * 1.4, -ay * s * 0.5), c + Vector2(0, ay * s * 0.7)]), Color("d9ac4f"))
 
 
 # Flat button that draws an X (cancel) or crossed swords (counter-attack).
@@ -548,6 +654,7 @@ var land := PackedByteArray()
 var coast: Array = []              # per player: {tile: true} for owned land tiles that touch water
 var is_coast := PackedByteArray() # 1 = land tile that touches water
 var img_interval := 0.05
+var ally_req := {}                # human alliance requests: "asker_target" -> tick_n until which the request stands (they answer by asking back)
 var ally_ask := {}                # "asker_target" -> tick_n before which that nation will not answer the asker again
 var info_panel: PanelContainer
 var info_sw: ColorRect
@@ -618,7 +725,14 @@ var border: Array = []            # per player: {tile: true} for owned tiles tha
 var lab_cache := {}
 var str_sz := {}                   # cached text sizes for map labels: "text|size" -> Vector2 (get_string_size every frame was the label cost)
 var atk_acc := 0.0
-var ui_font: Font                  # premium UI font (system font stack, falls back to Godot's default)
+var ui_font: Font                  # body face: bundled Lora (res://fonts), falls back to a system serif
+var ui_bold_font: Font             # Lora at a heavier weight: numbers
+var ui_title_font: Font            # bundled GFS Baskerville: headings, nation names on the map
+var cur_arrow: Texture2D           # historical cursor images (res://ui)
+var cur_cross: Texture2D
+var cur_hand: Texture2D
+var cur_soft := false              # true = the cursor is drawn by the game (fallback when the browser ignores custom cursors), toggle with F7
+var cur_node: Control
 var troops_bar: ProgressBar
 var troops_rate: Label
 var gold_rate: Label
@@ -692,16 +806,17 @@ var headless := false             # true on a dedicated server: no UI exists, so
 var winner_slot := 0              # set by tick() when a slot reaches WIN_SHARE (0 = nobody yet); the client turns it into text
 
 # ---- online play (see the "online" section): lockstep through a relay server ----
-const NET_VER := 13                                    # must match PROTO_VERSION in server/relay.py
+const NET_VER := 17                                    # must match PROTO_VERSION in server/relay.py
 # THE OFFICIAL SERVER (where the big "Join game" button goes). Put your hosted relay here BEFORE exporting.
 # A browser build (itch.io) needs wss://your-domain  (plain ws:// is blocked on https pages). "" = no official server, offline practice lobby only.
-const OFFICIAL_SERVER := "ws://localhost:8765"
+# !! This is a *quick tunnel* address: it dies whenever cloudflared / relay.py restarts and is different every time. For a release use a permanent https address (see server/DEPLOY.md), then re-export.
+const OFFICIAL_SERVER := "https://fighting-turn-century-agreement.trycloudflare.com"
 const DEFAULT_SERVER := OFFICIAL_SERVER               # what the private-room address box shows at first (type another relay's address to use it)
 const ONLINE_NATIONS := 24                            # nations in an online match (humans + bots), capped by the map's size
 const TURN_SECS := 0.1                                # one network turn = one attack step; every 5th turn is also an economy tick
 const NET_SPAWN_TURNS := 250                          # SPAWN_SECS / TURN_SECS
 const NET_SUM_EVERY := 50                             # every 5 s each client sends a state checksum so a desync is noticed
-const HUMAN_COLS := [Color("f2b84b"), Color("46c8f0"), Color("f05ac8"), Color("fa823c"), Color("ebebf5"), Color("96e65a"), Color("aa78ff"), Color("ff5a5a")]
+const HUMAN_COLS := [Color("d9ac4f"), Color("4a97d0"), Color("c04a6a"), Color("dc7a32"), Color("e6dcc0"), Color("8fba68"), Color("8e72c8"), Color("d4533f")]   # antique gold, azure, rose, ochre, ivory, sage, violet, vermilion
 var online := false               # true while connected to a relay (lobby or match)
 var net_ws: WebSocketPeer
 var net_state := ""               # "" / connecting / lobby / playing / lost
@@ -724,6 +839,8 @@ var pub_next := 0
 var pub_next_cap := 65
 var pub_retry := 0.0              # offline practice lobby: seconds until the next try to reach the official server
 var pub_conn_t := 0.0
+var pub_srv := ""                   # id of the relay process we are connected to (players on the same id are in the same lobby)
+var pub_online := 0
 var probe_ws: WebSocketPeer = null   # silent background try at the official server while the practice lobby is on screen
 var probe_t := 0.0
 var probe_sent := false
@@ -731,6 +848,10 @@ var human_picks := {}             # spawn phase: slot -> Vector2i chosen start o
 var fallen_shown := false
 var net_name_edit: LineEdit
 var net_server_edit: LineEdit
+var mob_cache := -1                   # -1 unknown, 0 desktop, 1 phone / tablet browser
+var paste_target: LineEdit = null
+var paste_ok_cb: Variant = null     # JavaScript callbacks (kept in variables so they are not freed)
+var paste_err_cb: Variant = null
 var net_room_edit: LineEdit
 var net_btn: Button
 var net_map_btn: Button
@@ -804,6 +925,7 @@ func _ready() -> void:
 	headless = DisplayServer.get_name() == "headless" or OS.has_feature("dedicated_server")
 	randomize()
 	_make_theme()
+	_setup_cursor()
 	_build_ui()
 	_build_background()
 	_build_terrain()
@@ -947,13 +1069,19 @@ func _set_own(i: int, o: int, delay: float = 0.0) -> void:
 		if old > 0 and o > 0 and phase == "play":
 			_fx_spark(i, o)   # a tile really changed hands between two nations (look only)
 		var c: int = comp[i]
+		var ctx_x := i % W
+		var ctx_y := i / W
 		if old > 0:
 			(border[old] as Dictionary).erase(i)
 			var op: Player = players[old]
 			op.comps[c] = int(op.comps.get(c, 0)) - 1
+			op.csx -= ctx_x
+			op.csy -= ctx_y
 		if o > 0:
 			var np: Player = players[o]
 			np.comps[c] = int(np.comps.get(c, 0)) + 1
+			np.csx += ctx_x
+			np.csy += ctx_y
 		if is_coast[i] == 1:
 			if old > 0:
 				(coast[old] as Dictionary).erase(i)
@@ -1287,8 +1415,7 @@ func _net_connect() -> void:
 		lobby_note = "Type the server address first."
 		lobby_refresh()
 		return
-	if not url.begins_with("ws://") and not url.begins_with("wss://"):
-		url = "wss://" + url
+	url = _ws_url(url)
 	var ws := WebSocketPeer.new()
 	if ws.connect_to_url(url) != OK:
 		lobby_note = "That server address does not work."
@@ -1356,7 +1483,7 @@ func net_poll() -> void:
 			var was_pub := net_pub
 			_net_close()
 			if was_pub:
-				pub_retry = 3.0 if was == "watching" else 15.0
+				pub_retry = 3.0 if was == "watching" else 5.0
 				if was == "watching" and not lobby.is_empty():
 					lobby["time"] = maxf(1.0, pub_left)   # the practice countdown goes on from the server's time instead of restarting
 				lobby_note = "Lost the connection to the official server - practice lobby until it is back." if was == "watching" else "Official server not reachable - practice lobby (retrying)."
@@ -1451,12 +1578,26 @@ func _net_lobby_refresh() -> void:
 # The server owns the map, the countdown and the player slots. The other nations (cap - open slots, e.g. 63 on a 65 map) are
 # bots shown as placeholders; when the countdown ends everybody who joined plays together and the bots fill the rest.
 
+# Any way of writing a server address -> a WebSocket address. "https://x" -> "wss://x", "http://x" -> "ws://x", "x" -> "wss://x".
+# (An address written as https://... used to become "wss://https://..." which can never connect: the official lobby then silently failed
+# and every player ended up in his own offline practice lobby - "everybody is in a different lobby".)
+func _ws_url(raw: String) -> String:
+	var u := raw.strip_edges()
+	while u.ends_with("/"):
+		u = u.left(u.length() - 1)
+	if u.begins_with("https://"):
+		u = "wss://" + u.substr(8)
+	elif u.begins_with("http://"):
+		u = "ws://" + u.substr(7)
+	elif not u.begins_with("ws://") and not u.begins_with("wss://"):
+		u = "wss://" + u
+	return u
+
+
 func _pub_connect() -> void:
 	if OFFICIAL_SERVER == "" or online:
 		return
-	var url := OFFICIAL_SERVER
-	if not url.begins_with("ws://") and not url.begins_with("wss://"):
-		url = "wss://" + url
+	var url := _ws_url(OFFICIAL_SERVER)
 	var ws := WebSocketPeer.new()
 	if ws.connect_to_url(url) != OK:
 		pub_retry = 15.0
@@ -1491,9 +1632,7 @@ func _pub_retry_step(delta: float) -> void:
 func _pub_probe() -> void:
 	if OFFICIAL_SERVER == "" or online or probe_ws != null or bool(lobby.get("me", false)):
 		return
-	var url := OFFICIAL_SERVER
-	if not url.begins_with("ws://") and not url.begins_with("wss://"):
-		url = "wss://" + url
+	var url := _ws_url(OFFICIAL_SERVER)
 	var ws := WebSocketPeer.new()
 	if ws.connect_to_url(url) != OK:
 		return
@@ -1556,11 +1695,15 @@ func _probe_poll(delta: float) -> void:
 func _pub_step(delta: float) -> void:
 	if pub_seq < 0:
 		pub_conn_t += delta
-		if pub_conn_t > 20.0:   # a server that was asleep can need well over 8 s
+		if pub_conn_t > 6.0:
+			# Do not make the player wait: after 6 s the practice lobby takes over (Join works at once) and the real server keeps being tried
+			# silently in the background for up to 20 s more (a server that was asleep needs that long); when it answers the lobby switches over.
 			_net_close()
-			lobby_note = "Official server not reachable - practice lobby (retrying)."
-			pub_retry = 15.0
+			lobby_note = "Server not answering yet (%s) - practice lobby meanwhile (still trying to connect)." % _ws_url(OFFICIAL_SERVER)
+			pub_retry = 0.5
 			lobby_refresh()
+		else:
+			lb_time.text = "Connecting...  %d s" % int(pub_conn_t)   # visibly alive, not frozen
 		return
 	pub_left = maxf(0.0, pub_left - delta)
 	var sec := ceili(pub_left)
@@ -1587,6 +1730,8 @@ func _pub_msg(d: Dictionary) -> void:
 	pub_open = int(d.get("open", 2))
 	pub_next = clampi(int(d.get("next", 0)), 0, MAPS.size() - 1)
 	pub_next_cap = int(d.get("next_cap", 65))
+	pub_srv = String(d.get("srv", ""))
+	pub_online = int(d.get("online", 0))
 	pub_left = float(d.get("left", 120))
 	pub_shown = -1
 	pub_in = bool(d.get("in", false))
@@ -1638,6 +1783,8 @@ func _pub_refresh() -> void:
 		lb_join.text = "Join game"
 		lb_join.disabled = false
 	lb_next.text = "Up next:  %s   -   %d players" % [MAPS[pub_next]["name"], pub_next_cap]
+	if pub_srv != "":
+		lb_next.text += "        Server %s  -  %d online" % [pub_srv, pub_online]
 	lb_note.text = lobby_note
 
 
@@ -1755,6 +1902,7 @@ func start_game() -> void:
 	border = []
 	coast = []
 	ally_ask = {}
+	ally_req = {}
 	for bi in N + 1:
 		border.append({})
 		coast.append({})
@@ -1809,14 +1957,14 @@ func start_game() -> void:
 			p.col = HUMAN_COLS[(i - 1) % HUMAN_COLS.size()]
 		elif not online and i == my_slot and not spectating:
 			p.nm = NAMES[0]
-			p.col = Color8(242, 184, 75)
+			p.col = Color("d9ac4f")
 		else:
 			var nn := NAMES.size() - 1
 			p.nm = NAMES[1 + (i - 2) % nn] + ("" if i - 2 < nn else " %d" % ((i - 2) / nn + 1))
 			var hue := fmod(i * 0.61803, 1.0)
 			if hue > 0.20 and hue < 0.36:
 				hue += 0.16   # greens vanish against the grass
-			p.col = Color.from_hsv(fmod(hue, 1.0), 0.50 if i % 2 == 0 else 0.62, 0.90 if i % 3 == 0 else 0.78)
+			p.col = Color.from_hsv(fmod(hue, 1.0), 0.44 if i % 2 == 0 else 0.56, 0.88 if i % 3 == 0 else 0.76)
 		p.bot = (not net_slots.has(i)) if online else (spectating or i != my_slot)
 		players.append(p)
 	set_mode("attack")
@@ -2463,7 +2611,8 @@ func _draw_nuke_preview() -> void:
 	draw_circle(pos, rin * zoom, Color(1.0, 0.15, 0.1, 0.22 if ok else 0.10))
 	draw_arc(pos, rin * zoom, 0.0, TAU, 48, Color(1.0, 0.2, 0.15, 0.9 if ok else 0.4), 2.5)
 	var font: Font = ui_font if ui_font != null else ThemeDB.fallback_font
-	_tip(font, "%s  -  %s gold" % [BUILD_LABEL[mode], _fmt(price(my_slot, mode))], "Click to launch   (Shift = keep firing, Esc = cancel)" if ok else why, Color("ffb347") if ok else Color("ff5b5b"), ok)
+	var mega_hint := "Click to launch: about 85%% of %s's land is destroyed   (Shift = keep firing, Esc = cancel)" % _aname(int(own[i])) if (mode == "mega" and ok) else "Click to launch   (Shift = keep firing, Esc = cancel)"
+	_tip(font, "%s  -  %s gold" % [BUILD_LABEL[mode], _fmt(price(my_slot, mode))], mega_hint if ok else why, Color("ffb347") if ok else Color("ff5b5b"), ok)
 
 
 # Bombs in flight (arc + trail), a warning ring on the target, and the blast flashes. Reads sim state, never changes it.
@@ -2639,6 +2788,8 @@ func _pill(font: Font, center: Vector2, text: String, col: Color) -> void:
 
 # Name + troop count printed on every nation's land (hidden when the nation is too small on screen).
 func _draw_labels(font: Font) -> void:
+	var nfont: Font = ui_title_font if ui_title_font != null else font   # nation names: Baskerville, like an atlas
+	var vfont: Font = ui_bold_font if ui_bold_font != null else font     # troop numbers
 	var taken: Array[Rect2] = []
 	var vps := get_viewport_rect().size
 	var panels: Array[Rect2] = []
@@ -2662,10 +2813,10 @@ func _draw_labels(font: Font) -> void:
 		var trs := _fmt(pl.troops / 10.0)
 		var k1 := "%s|%d" % [pl.nm, fs]
 		if not str_sz.has(k1):
-			str_sz[k1] = font.get_string_size(pl.nm, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
+			str_sz[k1] = nfont.get_string_size(pl.nm, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
 		var k2 := "%s|%d" % [trs, fs2]
 		if not str_sz.has(k2):
-			str_sz[k2] = font.get_string_size(trs, HORIZONTAL_ALIGNMENT_LEFT, -1, fs2)
+			str_sz[k2] = vfont.get_string_size(trs, HORIZONTAL_ALIGNMENT_LEFT, -1, fs2)
 		var s1: Vector2 = str_sz[k1]
 		var s2: Vector2 = str_sz[k2]
 		# a label whose centre is on screen is nudged so the whole text stays inside the window
@@ -2693,13 +2844,13 @@ func _draw_labels(font: Font) -> void:
 		taken.append(box)
 		var p1 := c + Vector2(-s1.x / 2.0, -2.0)
 		var p2 := c + Vector2(-s2.x / 2.0, fs2 + 2.0)
-		var ncol := ACC if o == my_slot else (UI_GOOD.lightened(0.2) if (players[my_slot] as Player).allies.has(o) else Color.WHITE)
-		# thin dark outline + soft shadow keeps the text readable on every nation colour
-		draw_string_outline(font, p1 + Vector2(0, 1), pl.nm, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 6, Color(0, 0, 0, 0.35))
-		draw_string_outline(font, p1, pl.nm, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 4, Color(0.03, 0.05, 0.08, 0.92))
-		draw_string(font, p1, pl.nm, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, ncol)
-		draw_string_outline(font, p2, trs, HORIZONTAL_ALIGNMENT_LEFT, -1, fs2, 4, Color(0.03, 0.05, 0.08, 0.92))
-		draw_string(font, p2, trs, HORIZONTAL_ALIGNMENT_LEFT, -1, fs2, Color("dfe9f0"))
+		var ncol := ACC if o == my_slot else (UI_GOOD.lightened(0.2) if (players[my_slot] as Player).allies.has(o) else Color("f7efd6"))
+		# thin dark-ink outline + soft shadow keeps the text readable on every nation colour
+		draw_string_outline(nfont, p1 + Vector2(0, 1), pl.nm, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 6, Color(0, 0, 0, 0.35))
+		draw_string_outline(nfont, p1, pl.nm, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 4, Color(0.07, 0.05, 0.03, 0.92))
+		draw_string(nfont, p1, pl.nm, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, ncol)
+		draw_string_outline(vfont, p2, trs, HORIZONTAL_ALIGNMENT_LEFT, -1, fs2, 4, Color(0.07, 0.05, 0.03, 0.92))
+		draw_string(vfont, p2, trs, HORIZONTAL_ALIGNMENT_LEFT, -1, fs2, Color("efe3c6"))
 
 
 func _draw_rails() -> void:
@@ -3010,16 +3161,16 @@ func _over_ui(pos: Vector2) -> bool:
 
 
 func _tip(font: Font, title: String, sub: String, col: Color, ok: bool, alpha: float = 1.0) -> void:
-	var tw := maxf(font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x, font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x)
+	var tw := maxf(font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x, font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 10).x)
 	var mp := get_viewport().get_mouse_position() + Vector2(18, 22)
 	var vp := get_viewport_rect().size
-	mp.x = maxf(12.0, minf(mp.x, vp.x - tw - 24.0))
-	mp.y = maxf(24.0, minf(mp.y, vp.y - 56.0))
-	var bg := Rect2(mp - Vector2(8, 16), Vector2(tw + 16, 44))
+	mp.x = maxf(10.0, minf(mp.x, vp.x - tw - 20.0))
+	mp.y = maxf(20.0, minf(mp.y, vp.y - 44.0))
+	var bg := Rect2(mp - Vector2(6, 12), Vector2(tw + 12, 34))
 	draw_rect(bg, Color(0.03, 0.08, 0.12, 0.88 * alpha))
 	draw_rect(bg, Color(col, 0.9 * alpha), false, 1.5)
-	draw_string(font, mp, title, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color(1, 1, 1, alpha))
-	draw_string(font, mp + Vector2(0, 18), sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(Color("b9d3e0") if ok else col, alpha))
+	draw_string(font, mp, title, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1, alpha))
+	draw_string(font, mp + Vector2(0, 14), sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(Color("b9d3e0") if ok else col, alpha))
 
 
 # Warship / mine placement: tints the water you can reach from your ports and shows a ghost under the cursor.
@@ -4543,13 +4694,13 @@ func _silo_ready(p: int, need: int = 1) -> bool:
 
 func _bomb_inner(kind: String) -> float:
 	if kind == "mega":
-		return float(maxi(W, H)) * MEGA_RADIUS_FRAC
+		return 6.0   # only the aiming marker: the real crater is worked out at impact (see _detonate_mega)
 	return float(BOMB_INNER[kind])
 
 
 func _bomb_outer(kind: String) -> float:
 	if kind == "mega":
-		return _bomb_inner(kind) * 1.15
+		return 12.0
 	return float(BOMB_OUTER[kind])
 
 
@@ -4567,7 +4718,7 @@ func _launch_nuke(p: int, kind: String, target: int) -> void:
 	var sb: Dictionary = bld[silo]
 	sb["rl"] = int(SILO_RELOAD_BY_LEVEL[clampi(int(sb.get("lv", 1)), 1, LAUNCHER_MAX)])
 	var dist := _wpos(silo).distance_to(_wpos(target))
-	nukes.append({"id": next_atk_id, "o": p, "kind": kind, "a": silo, "b": target, "k": 0, "n": maxi(1, int(ceil(dist / NUKE_SPEED)))})
+	nukes.append({"id": next_atk_id, "o": p, "kind": kind, "tn": int(own[target]), "a": silo, "b": target, "k": 0, "n": maxi(1, int(ceil(dist / NUKE_SPEED)))})
 	next_atk_id += 1
 	var tow := int(own[target])
 	if tow > 0:
@@ -4642,6 +4793,9 @@ func _mark_fallout(i: int) -> void:
 # tile that lost its owner in the ring) ends up unowned AND contaminated: nobody owns it, it is drawn as a green fallout zone, and
 # anyone can claim it again by attacking it like normal free land.
 func _detonate(nk: Dictionary) -> void:
+	if String(nk["kind"]) == "mega":
+		_detonate_mega(nk)
+		return
 	var kind := String(nk["kind"])
 	var rin := _bomb_inner(kind)
 	var rout := _bomb_outer(kind)
@@ -4656,6 +4810,45 @@ func _detonate(nk: Dictionary) -> void:
 		"tb": tiles_before, "hit": {}})
 	if not headless:
 		blasts.append({"p": Vector2(float(cx) + 0.5, float(cy) + 0.5), "t0": clock, "big": true, "r": rout, "ri": rin})
+		if blasts.size() > 12:
+			blasts.pop_front()
+
+
+# Mega Bomb: finds the crater radius R around the impact tile that holds MEGA_LAND_SHARE (85 %) of the target nation's tiles
+# (distance histogram, no sorting, integer buckets = identical on every client), then a sweep job destroys exactly that nation's
+# tiles inside R. Other nations and free land inside the circle are untouched.
+func _detonate_mega(nk: Dictionary) -> void:
+	var tn := int(nk.get("tn", 0))
+	var tt := int(nk["b"])
+	var cx := tt % W
+	var cy := tt / W
+	if tn <= 0 or tn > N or not (players[tn] as Player).alive:
+		_ev_say(int(nk["o"]), "The Mega Bomb found nothing left to destroy", 3.0, "bad")
+		return
+	var buckets := PackedInt32Array()
+	buckets.resize(W + H + 2)
+	var total := 0
+	for y in H:
+		var dy2 := (y - cy) * (y - cy)
+		var row := y * W
+		for x in W:
+			if own[row + x] == tn:
+				buckets[int(ceil(sqrt(float((x - cx) * (x - cx) + dy2))))] += 1
+				total += 1
+	if total == 0:
+		return
+	var goal := int(ceil(float(total) * MEGA_LAND_SHARE))
+	var acc := 0
+	var r := 0
+	while r < buckets.size() and acc < goal:
+		acc += buckets[r]
+		r += 1
+	var crater := float(maxi(1, r - 1))   # every tile of the target within `crater` tiles of the impact is destroyed
+	var rr := int(ceil(crater))
+	blast_jobs.append({"o": int(nk["o"]), "cx": cx, "cy": cy, "rin": crater, "rout": crater, "y": maxi(0, cy - rr), "y1": mini(H - 1, cy + rr),
+		"tb": {tn: (players[tn] as Player).tiles}, "hit": {}, "only": tn})
+	if not headless:
+		blasts.append({"p": Vector2(float(cx) + 0.5, float(cy) + 0.5), "t0": clock, "big": true, "r": crater, "ri": crater * 0.35})
 		if blasts.size() > 12:
 			blasts.pop_front()
 
@@ -4679,6 +4872,7 @@ func _blast_rows(job: Dictionary) -> bool:
 	var rout2 := float(job["rout"]) * float(job["rout"])
 	var rr := int(ceil(float(job["rout"])))
 	var by := int(job["o"])
+	var only := int(job.get("only", 0))   # Mega Bomb: only this nation's tiles are hit
 	var hit: Dictionary = job["hit"]
 	var x0 := maxi(0, cx - rr)
 	var x1 := mini(W - 1, cx + rr)
@@ -4695,6 +4889,8 @@ func _blast_rows(job: Dictionary) -> bool:
 			if land[i] == 0:
 				continue
 			var ow := int(own[i])
+			if only > 0 and ow != only:
+				continue
 			if ow == 0:
 				if d2 <= rin2:
 					_mark_fallout(i)   # free land in the blast is contaminated too
@@ -4722,6 +4918,7 @@ func _blast_finish(job: Dictionary) -> void:
 	var rout := float(job["rout"])
 	var hit: Dictionary = job["hit"]
 	var tiles_before: Dictionary = job["tb"]
+	var only := int(job.get("only", 0))
 	var centre := Vector2(float(cx), float(cy))
 	# 2. troops: proportional to the share of land lost
 	for who in hit:
@@ -4734,7 +4931,10 @@ func _blast_finish(job: Dictionary) -> void:
 	for k in bld.keys():
 		var bb: Dictionary = bld[k]
 		var kd := _wpos(int(k)).distance_to(centre)
-		if kd <= rin or (kd <= rout and int(own[int(k)]) != int(bb["o"])):
+		var gone: bool = kd <= rin or (kd <= rout and int(own[int(k)]) != int(bb["o"]))
+		if only > 0:
+			gone = int(bb["o"]) == only and int(own[int(k)]) != only   # Mega Bomb: only the target's buildings that lost their land
+		if gone:
 			var bo := int(bb["o"])
 			lost_b[bo] = int(lost_b.get(bo, 0)) + 1
 			_destroy_building(int(k))
@@ -4742,6 +4942,8 @@ func _blast_finish(job: Dictionary) -> void:
 		_ev_say(int(bo2), "Nuclear strike destroyed %d of your buildings" % int(lost_b[bo2]), 4.0, "bad")
 	if not lost_b.is_empty():
 		rebuild_rails()
+	if only > 0:
+		return   # a Mega Bomb never touches ships, boats or mines
 	# 4. units at sea inside rin are destroyed (no gold, no troops)
 	for sh in ships.duplicate():
 		if _wpos(int(sh["t"])).distance_to(centre) <= rin:
@@ -5293,7 +5495,6 @@ func step_attack(a: Dictionary, mult: float = 1.0) -> bool:
 		a["pos"] = Vector2(bi % W + 0.5, bi / W + 0.5)
 	var order: Array[int] = []
 	var end3 := tier3.size()
-	var end2 := end3 + tier2.size()
 	order.append_array(tier3)
 	order.append_array(tier2)
 	order.append_array(tier1)
@@ -5313,19 +5514,32 @@ func step_attack(a: Dictionary, mult: float = 1.0) -> bool:
 		var lad := _large_bonus(int(float(foe.tiles) * of_k), 0.3)
 		foe_loss = foe.troops / maxf(1.0, float(foe.tiles))
 		var ratio := foe.troops / atk_troops
-		loss_per_tile = mag * clampf(ratio, 0.6, 2.0) * (0.463 * lab * lad * of_k + 0.0039 * foe_loss)
+		loss_per_tile = mag * clampf(ratio, 0.6, 2.0) * (0.463 * lab * lad * of_k + 0.0039 * foe_loss) * ATK_LOSS_MULT
 		var speed_cost := clampf(ratio, 0.82, 7.5) * clampf(ratio / 20.0, 1.0, 50.0) / 8.55
-		frac_per_tile = speed_cost * tile_cost * _large_bonus(int(float(me.tiles) * of_k), 0.73) * lad / bsz * sqrt(of_k)
+		var adv := 1.0
+		var rr := atk_troops / maxf(1.0, foe.troops)   # how many times stronger the attacker is
+		if rr > ATK_ADV_START:
+			adv = clampf(1.0 + ATK_ADV_SLOPE * log(rr / ATK_ADV_START) / log(2.0), 1.0, ATK_ADV_MAX)
+		frac_per_tile = speed_cost * tile_cost * _large_bonus(int(float(me.tiles) * of_k), 0.73) * lad / bsz * sqrt(of_k) / ATK_SPEED_MULT / adv
 	var done: Array[int] = []
 	var fsum := 0.0
 	var k := 0
+	var round_bias := foe == null and me.tiles > 0
+	var ccx := float(me.csx) / float(maxi(1, me.tiles))
+	var ccy := float(me.csy) / float(maxi(1, me.tiles))
 	# an attack keeps conquering tiles until their cost fractions add up to 1 (one 0.1 s OpenFront tick)
 	while k < order.size() and fsum < mult:
 		if k >= end3:
-			# lazy shuffle inside tier 2 / tier 1: only the few tiles really taken this step are drawn at random (shuffling a whole big
-			# front every step was one of the biggest late-game costs); same random order as a full shuffle, same on every client
-			var hi := end2 if k < end2 else order.size()
+			# Notch tiles (3+ own neighbours) go first; every other front tile is drawn at random from ONE pool (the old "corners before
+			# flat sides" rule made every nation grow as a square). Free-land growth also prefers, out of two random candidates, the one
+			# nearer to the nation's centre, so a nation grows as a round blob. Lazy: only the tiles really taken this step are drawn
+			# (shuffling a whole big front every step was a big late-game cost); sim_rng only, so every client picks the same tiles.
+			var hi := order.size()
 			var j := k + sim_rng.randi() % (hi - k)
+			if round_bias:
+				var j2 := k + sim_rng.randi() % (hi - k)
+				if sim_rng.randf() < 0.75 and _cdist2(order[j2], ccx, ccy) < _cdist2(order[j], ccx, ccy):
+					j = j2
 			var sw: int = order[k]
 			order[k] = order[j]
 			order[j] = sw
@@ -5366,6 +5580,12 @@ func step_attack(a: Dictionary, mult: float = 1.0) -> bool:
 		_ev_ring(o, a["pos"], BLUE, 0.7, 4.0)   # visual only: your attack escalated
 	a["stage"] = new_stage
 	return true
+
+
+func _cdist2(i: int, cx: float, cy: float) -> float:
+	var dx := float(i % W) - cx
+	var dy := float(i / W) - cy
+	return dx * dx + dy * dy
 
 
 # Any small pocket of non-mine land that is completely enclosed by my territory (it never touches water or the map
@@ -5475,8 +5695,6 @@ func eliminate(f: Player, o: int) -> void:
 func _boat_plan(o: int, clicked: int) -> Dictionary:
 	if land[clicked] == 0:
 		return {"why": "Pick land"}
-	if not _has_port(o):
-		return {"why": "Build a port first - troop boats leave from your ports"}
 	var t: int = own[clicked]
 	var cx := clicked % W
 	var cy := clicked / W
@@ -5532,11 +5750,15 @@ func _boat_plan(o: int, clicked: int) -> Dictionary:
 	var q: Array[int] = []
 	var wm1 := W - 1
 	var last := W * (H - 1)
-	for wn in _port_waters(o):
+	# the boat leaves from any water next to my coast (no port needed); a big coast is sampled so the search stays cheap
+	for wn in _coast_waters(o):
 		if par[wn] == -2:
 			par[wn] = -1
 			dist[wn] = 0
 			q.append(wn)
+	if q.is_empty():
+		_bfs_q = q
+		return {"why": "Your land does not touch the sea - a boat needs a coast to leave from"}
 	var head := 0
 	var end := -1
 	while head < q.size():
@@ -5578,8 +5800,31 @@ func _boat_plan(o: int, clicked: int) -> Dictionary:
 				q.append(m)
 	_bfs_q = q
 	if end < 0:
-		return {"why": "No sea route from your ports to there"}
+		return {"why": "No sea route from your coast to there"}
 	return {"ok": true, "path": _water_path(par, end), "landing": int(wt[end]), "t": t}
+
+
+# Water tiles touching nation o's coast (every `stp`-th coast tile when the coast is huge). Fixed dictionary order = same list on every client.
+func _coast_waters(o: int) -> Array[int]:
+	var out: Array[int] = []
+	var cd: Dictionary = coast[o]
+	var stp := maxi(1, cd.size() / 1500)
+	var n := 0
+	for k in cd:
+		n += 1
+		if n % stp != 0:
+			continue
+		var ki: int = int(k)
+		var kx := ki % W
+		if kx > 0 and land[ki - 1] == 0:
+			out.append(ki - 1)
+		if kx < W - 1 and land[ki + 1] == 0:
+			out.append(ki + 1)
+		if ki >= W and land[ki - W] == 0:
+			out.append(ki - W)
+		if ki < W * (H - 1) and land[ki + W] == 0:
+			out.append(ki + W)
+	return out
 
 
 func launch_boat_plan(o: int, plan: Dictionary, frac: float) -> bool:
@@ -5795,6 +6040,16 @@ func validate(slot: int, cmd: Dictionary, ai: bool = false) -> String:
 				return "Build a Bomb Launcher first"
 			if pl.gold < float(price(slot, nkind)):
 				return "Not enough gold (need %s)" % _fmt(price(slot, nkind))
+			if nkind == "mega":
+				var mtn := int(own[nt])
+				if land[nt] == 0 or mtn <= 0:
+					return "The Mega Bomb needs a nation: click its land"
+				if mtn == slot:
+					return "That is your own land"
+				if pl.allies.has(mtn):
+					return "You are allied with %s - cancel the alliance first" % _aname(mtn)
+				if not (players[mtn] as Player).alive:
+					return "That nation is already gone"
 			var nneed := int(BOMB_NEED_LEVEL[nkind])
 			if _silo_for(slot, nt, nneed) < 0:
 				if _silo_for(slot, nt, 1) < 0:
@@ -5823,10 +6078,11 @@ func validate(slot: int, cmd: Dictionary, ai: bool = false) -> String:
 				return "That nation is already gone"
 			if pl.allies.has(at):
 				return "Already allied"
-			if not ap.bot:
-				return "Alliances with human players are not available yet"
-			if tick_n < int(ally_ask.get("%d_%d" % [slot, at], -1)):
-				return "%s just turned you down - try again in a moment" % ap.nm
+			if ap.bot:
+				if tick_n < int(ally_ask.get("%d_%d" % [slot, at], -1)):
+					return "%s just turned you down - try again in a moment" % ap.nm
+			elif tick_n < int(ally_req.get("%d_%d" % [slot, at], -1)):
+				return "Request already sent - waiting for %s to accept" % ap.nm
 			return ""
 		"ally_cancel":
 			if not _is_int(cmd.get("target")):
@@ -5939,6 +6195,23 @@ func _exec(cmd: Dictionary) -> void:
 func _apply_ally_ask(slot: int, t: int) -> void:
 	var me: Player = players[slot]
 	var pl: Player = players[t]
+	if not pl.bot:
+		# A real player decides for themselves: the first "Make alliance" is a request, and when the other player presses it
+		# back (their menu then says "Accept alliance") the alliance is formed. No randomness: every client does the same.
+		var back := "%d_%d" % [t, slot]
+		if tick_n < int(ally_req.get(back, -1)):
+			ally_req.erase(back)
+			ally_req.erase("%d_%d" % [slot, t])
+			me.allies[t] = true
+			pl.allies[slot] = true
+			_cancel_between(slot, t)
+			_ev_say(slot, "Alliance formed with %s" % pl.nm, 3.5, "good")
+			_ev_say(t, "Alliance formed with %s" % me.nm, 3.5, "good")
+		else:
+			ally_req["%d_%d" % [slot, t]] = tick_n + ALLY_REQ_TICKS
+			_ev_say(slot, "Alliance request sent to %s" % pl.nm, 3.0, "good")
+			_ev_say(t, "%s asks you for an alliance - right-click their land and press Accept alliance" % me.nm, 9.0, "good")
+		return
 	if sim_rng.randf() < 0.6:
 		me.allies[t] = true
 		pl.allies[slot] = true
@@ -6481,7 +6754,49 @@ func _step_zoom(delta: float) -> void:
 	zoom = nz
 
 
+# ---- cursor: a small brass pointer / reticle (res://ui/cursor_*.png). Hotspots: arrow tip (2,2), reticle centre (16,16). ----
+# F7 switches to the game-drawn fallback cursor (use it if a browser shows no / a wrong custom cursor). Not used on phones (no cursor there).
+func _setup_cursor() -> void:
+	if _mobile_browser():
+		return
+	cur_arrow = load("res://ui/cursor_arrow.png") as Texture2D if ResourceLoader.exists("res://ui/cursor_arrow.png") else null
+	cur_cross = load("res://ui/cursor_cross.png") as Texture2D if ResourceLoader.exists("res://ui/cursor_cross.png") else null
+	cur_hand = load("res://ui/cursor_hand.png") as Texture2D if ResourceLoader.exists("res://ui/cursor_hand.png") else null
+	if cur_arrow == null or cur_cross == null:
+		return   # images missing: the normal system cursor stays
+	var layer := CanvasLayer.new()
+	layer.layer = 120
+	add_child(layer)
+	var sc := SoftCursor.new()
+	sc.main = self
+	sc.tex_arrow = cur_arrow
+	sc.tex_cross = cur_cross
+	sc.visible = false
+	layer.add_child(sc)
+	cur_node = sc
+	_apply_cursor()
+
+
+func _apply_cursor() -> void:
+	if cur_arrow == null or cur_node == null:
+		return
+	if cur_soft:
+		Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
+		cur_node.visible = true
+	else:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		cur_node.visible = false
+		Input.set_custom_mouse_cursor(cur_arrow, Input.CURSOR_ARROW, Vector2(2, 2))
+		Input.set_custom_mouse_cursor(cur_cross, Input.CURSOR_CROSS, Vector2(16, 16))
+		if cur_hand != null:
+			Input.set_custom_mouse_cursor(cur_hand, Input.CURSOR_POINTING_HAND, Vector2(2, 2))
+
+
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and (event as InputEventKey).pressed and not (event as InputEventKey).echo and (event as InputEventKey).keycode == KEY_F7:
+		cur_soft = not cur_soft
+		_apply_cursor()
+		return
 	if event is InputEventKey and (event as InputEventKey).pressed and not (event as InputEventKey).echo and (event as InputEventKey).keycode == KEY_F3:
 		_perf_toggle()
 		return
@@ -6509,7 +6824,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					ui()
 			elif phase == "play":
 				var rt := _tile_at(mb.position)
-				if rt >= 0 and land[rt] == 1 and own[rt] > 1 and (players[own[rt]] as Player).alive:
+				if rt >= 0 and land[rt] == 1 and own[rt] > 0 and own[rt] != my_slot and (players[own[rt]] as Player).alive:
 					_open_ctx(mb.position, rt)
 		elif mb.pressed and mb.button_index == MOUSE_BUTTON_WHEEL_UP:
 			zoom_at(1.15, mb.position)
@@ -6831,8 +7146,18 @@ func _open_ctx(sp: Vector2, tile: int) -> void:
 	ctx_tile = tile
 	ctx_title.text = pl.nm
 	ctx_title.add_theme_color_override("font_color", pl.col.lightened(0.3))
-	ctx_make.disabled = allied
-	ctx_make.tooltip_text = "Already allied" if allied else "Ask %s for an alliance" % pl.nm
+	var asked_me := tick_n < int(ally_req.get("%d_%d" % [t, my_slot], -1))
+	var i_asked := tick_n < int(ally_req.get("%d_%d" % [my_slot, t], -1))
+	ctx_make.text = "Accept alliance" if asked_me else "Make alliance"
+	ctx_make.disabled = allied or (i_asked and not asked_me)
+	if allied:
+		ctx_make.tooltip_text = "Already allied"
+	elif asked_me:
+		ctx_make.tooltip_text = "%s asked you for an alliance - press to accept" % pl.nm
+	elif i_asked:
+		ctx_make.tooltip_text = "Request sent - waiting for %s to accept" % pl.nm
+	else:
+		ctx_make.tooltip_text = "Ask %s for an alliance" % pl.nm
 	ctx_cancel.disabled = not allied
 	ctx_cancel.tooltip_text = "End the alliance" if allied else "You have no alliance with %s" % pl.nm
 	var tr_off := no_trade.has(my_slot * 1000 + t)
@@ -6901,16 +7226,17 @@ func _ctx_btn(text: String, col: Color) -> Button:
 	b.text = text
 	b.focus_mode = Control.FOCUS_NONE
 	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	b.custom_minimum_size = Vector2(0, 34)
+	b.custom_minimum_size = Vector2(0, 26)
+	b.add_theme_font_size_override("font_size", 12)
 	var grey := Color("6b7680")
 	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
 		var sb := StyleBoxFlat.new()
 		sb.set_corner_radius_all(6)
 		sb.set_border_width_all(1)
-		sb.content_margin_left = 12
-		sb.content_margin_right = 12
-		sb.content_margin_top = 6
-		sb.content_margin_bottom = 6
+		sb.content_margin_left = 9
+		sb.content_margin_right = 9
+		sb.content_margin_top = 3
+		sb.content_margin_bottom = 3
 		if state == "disabled":
 			sb.bg_color = Color(0.16, 0.19, 0.22, 0.92)
 			sb.border_color = Color(grey, 0.5)
@@ -6972,36 +7298,37 @@ func _ui_body() -> void:
 	lb_sig = sig
 	for c in lb_box.get_children():
 		c.queue_free()
-	lb_box.add_theme_constant_override("separation", 5)
-	lb_box.add_child(_small_label("LEADERBOARD", 11, UI_MUTED))
+	lb_box.add_theme_constant_override("separation", 1)
+	lb_box.add_child(_small_label("LEADERBOARD", 9, UI_MUTED))
 	for k in shown.size():
 		_lb_row(k + 1, shown[k], me)
 	var my_rank := alive.find(me)
 	if my_rank >= 6:
-		lb_box.add_child(_small_label("...", 12, UI_MUTED))
+		lb_box.add_child(_small_label("...", 10, UI_MUTED))
 		_lb_row(my_rank + 1, me, me)
 
 
 func _lb_row(rank: int, p: Player, me: Player) -> void:
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 8)
-	var rk := _small_label(str(rank), 12, UI_MUTED)
-	rk.custom_minimum_size = Vector2(14, 0)
+	row.add_theme_constant_override("separation", 5)
+	var rk := _small_label(str(rank), 10, UI_MUTED)
+	rk.custom_minimum_size = Vector2(10, 0)
 	row.add_child(rk)
 	var sw := ColorRect.new()
 	sw.color = p.col
-	sw.custom_minimum_size = Vector2(10, 10)
+	sw.custom_minimum_size = Vector2(8, 8)
 	sw.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	row.add_child(sw)
 	var nl := Label.new()
 	nl.text = p.nm
-	nl.add_theme_font_size_override("font_size", 14)
+	nl.clip_text = true
+	nl.add_theme_font_size_override("font_size", 11)
 	nl.add_theme_color_override("font_color", ACC if p == me else UI_TEXT)
 	nl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(nl)
 	var pl := Label.new()
 	pl.text = "%.1f%%" % (p.tiles * 100.0 / land_count)
-	pl.add_theme_font_size_override("font_size", 14)
+	pl.add_theme_font_size_override("font_size", 11)
 	pl.add_theme_color_override("font_color", ACC if p == me else UI_MUTED)
 	row.add_child(pl)
 	lb_box.add_child(row)
@@ -7112,7 +7439,7 @@ func _place_sub() -> void:
 func _style_arrow(b: Button) -> void:
 	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
 		var sb := StyleBoxFlat.new()
-		sb.bg_color = Color(0.16, 0.3, 0.4, 0.98) if state == "hover" else Color(0.1, 0.2, 0.28, 0.98)
+		sb.bg_color = Color(0.24, 0.17, 0.08, 0.98) if state == "hover" else Color(0.13, 0.10, 0.06, 0.98)
 		sb.set_corner_radius_all(5)
 		sb.set_border_width_all(1)
 		sb.border_color = ACC
@@ -7146,11 +7473,11 @@ func _atk_row(a: Dictionary, kind: String) -> void:
 		title = "%s attacks you" % _aname(int(a["o"]))
 	else:
 		title = "Attacking %s" % _aname(int(a["t"]))
-	vb.add_child(_small_label(title, 14, col))
-	var sub := _small_label("", 11, UI_MUTED)
+	vb.add_child(_small_label(title, 12, col))
+	var sub := _small_label("", 9, UI_MUTED)
 	vb.add_child(sub)
 	row.add_child(vb)
-	var tl := _small_label("", 15, Color.WHITE)
+	var tl := _small_label("", 12, Color.WHITE)
 	tl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	row.add_child(tl)
 	var btn := IconBtn.new()
@@ -7269,7 +7596,9 @@ func say(t: String, secs: float = 2.5, kind: String = "info") -> void:
 		edge = Color(UI_BAD, 0.60)
 	msg_label.add_theme_color_override("font_color", col)
 	var sbx := msg_panel.get_theme_stylebox("panel")
-	if sbx is StyleBoxFlat:
+	if sbx is HistBox:
+		(sbx as HistBox).set_edge(UI_BRASS if kind == "info" else (UI_GOOD if kind == "good" else UI_BAD))
+	elif sbx is StyleBoxFlat:
 		(sbx as StyleBoxFlat).border_color = edge
 		(sbx as StyleBoxFlat).set_border_width_all(1 if kind == "info" else 2)
 	msg_panel.visible = true
@@ -7325,37 +7654,77 @@ func _card_deny(t: String) -> void:
 		tw.tween_property(b, "rotation", r, 0.05)
 
 
-# One Theme for the whole window: system font stack, calm text colours, tooltips and the attack slider.
+# One Theme for the whole window: bundled antique typefaces, parchment tooltips, engraved text fields, a brass attack slider.
 func _make_theme() -> void:
-	var sf := SystemFont.new()
-	sf.font_names = PackedStringArray(["Inter", "Segoe UI Variable", "Segoe UI", "SF Pro Text", "Roboto", "Helvetica Neue", "Noto Sans", "Arial"])
-	sf.hinting = TextServer.HINTING_LIGHT
-	ui_font = sf
+	var body_f: Font = null
+	var title_f: Font = null
+	if ResourceLoader.exists("res://fonts/Lora-Variable.ttf"):
+		body_f = load("res://fonts/Lora-Variable.ttf") as Font
+	if ResourceLoader.exists("res://fonts/GFSBaskerville.otf"):
+		title_f = load("res://fonts/GFSBaskerville.otf") as Font
+	if body_f == null:   # fonts not imported yet / missing: a system serif (browsers fall back to their default)
+		var sf := SystemFont.new()
+		sf.font_names = PackedStringArray(["Georgia", "Palatino Linotype", "Book Antiqua", "Cambria", "Times New Roman", "serif"])
+		sf.hinting = TextServer.HINTING_LIGHT
+		body_f = sf
+	ui_font = body_f
+	var bold := FontVariation.new()
+	bold.base_font = body_f
+	bold.variation_opentype = {2003265652: 650.0}   # 'wght' axis of the variable Lora (ignored by fonts without it)
+	ui_bold_font = bold
+	if title_f != null:
+		var tv := FontVariation.new()
+		tv.base_font = title_f
+		tv.spacing_glyph = 1
+		ui_title_font = tv
+	else:
+		ui_title_font = body_f
 	var th := Theme.new()
-	th.default_font = sf
-	th.default_font_size = 15
+	th.default_font = body_f
+	th.default_font_size = 14
 	th.set_color("font_color", "Label", UI_TEXT)
+	# tooltips: small parchment cards
 	var tip := StyleBoxFlat.new()
-	tip.bg_color = Color(0.04, 0.07, 0.10, 0.96)
-	tip.border_color = Color(1, 1, 1, 0.14)
+	tip.bg_color = Color("efe2bf")
+	tip.border_color = UI_BRASS
 	tip.set_border_width_all(1)
-	tip.set_corner_radius_all(6)
+	tip.set_corner_radius_all(2)
 	tip.content_margin_left = 10
 	tip.content_margin_right = 10
 	tip.content_margin_top = 6
 	tip.content_margin_bottom = 6
 	th.set_stylebox("panel", "TooltipPanel", tip)
-	th.set_color("font_color", "TooltipLabel", UI_TEXT)
+	th.set_color("font_color", "TooltipLabel", UI_INK)
 	th.set_font_size("font_size", "TooltipLabel", 13)
-	# attack slider: thin dark track, gold fill, round gold handle
+	# text fields (lobby): dark ink with a brass line, gold when focused
+	var le := StyleBoxFlat.new()
+	le.bg_color = Color(0.03, 0.055, 0.095, 0.96)
+	le.border_color = UI_BRASS
+	le.set_border_width_all(1)
+	le.set_corner_radius_all(2)
+	le.content_margin_left = 8
+	le.content_margin_right = 8
+	le.content_margin_top = 4
+	le.content_margin_bottom = 4
+	var lef := le.duplicate() as StyleBoxFlat
+	lef.border_color = ACC
+	lef.set_border_width_all(2)
+	th.set_stylebox("normal", "LineEdit", le)
+	th.set_stylebox("read_only", "LineEdit", le)
+	th.set_stylebox("focus", "LineEdit", lef)
+	th.set_color("font_color", "LineEdit", UI_TEXT)
+	th.set_color("font_placeholder_color", "LineEdit", UI_MUTED)
+	th.set_color("caret_color", "LineEdit", ACC)
+	th.set_color("selection_color", "LineEdit", Color(ACC, 0.35))
+	# attack slider: thin brass track, gold fill, round gold handle
 	var track := StyleBoxFlat.new()
-	track.bg_color = Color(1, 1, 1, 0.10)
-	track.set_corner_radius_all(3)
+	track.bg_color = Color(0.85, 0.67, 0.31, 0.16)
+	track.set_corner_radius_all(2)
 	track.content_margin_top = 3
 	track.content_margin_bottom = 3
 	var fill := StyleBoxFlat.new()
 	fill.bg_color = ACC
-	fill.set_corner_radius_all(3)
+	fill.set_corner_radius_all(2)
 	fill.content_margin_top = 3
 	fill.content_margin_bottom = 3
 	th.set_stylebox("slider", "HSlider", track)
@@ -7379,48 +7748,51 @@ func _make_theme() -> void:
 
 func _panel() -> PanelContainer:
 	var pc := PanelContainer.new()
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.043, 0.075, 0.110, 0.90)
-	sb.border_color = UI_LINE
-	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(10)
-	sb.shadow_color = Color(0, 0, 0, 0.38)
-	sb.shadow_size = 12
-	sb.shadow_offset = Vector2(0, 4)
-	sb.content_margin_left = 14
-	sb.content_margin_right = 14
-	sb.content_margin_top = 11
-	sb.content_margin_bottom = 11
-	pc.add_theme_stylebox_override("panel", sb)
+	var hb := HistBox.new()
+	hb.fill = UI_NAVY
+	hb.edge = UI_BRASS
+	hb.content_margin_left = 10.0
+	hb.content_margin_right = 10.0
+	hb.content_margin_top = 8.0
+	hb.content_margin_bottom = 8.0
+	pc.add_theme_stylebox_override("panel", hb)
 	return pc
 
 
-# primary = solid gold action button, otherwise a quiet glass button (zoom +/-)
+# primary = solid brass action button, otherwise a quiet navy button with a brass hairline (zoom +/-, spectate)
 func _style_button(b: Button, primary: bool = true) -> void:
 	for state in ["normal", "hover", "pressed", "disabled"]:
 		var sb := StyleBoxFlat.new()
 		if primary:
-			sb.bg_color = ACC
+			sb.bg_color = Color("c9993f")
 			if state == "hover":
-				sb.bg_color = ACC.lightened(0.14)
+				sb.bg_color = Color("c9993f").lightened(0.14)
 			elif state == "pressed":
-				sb.bg_color = ACC.darkened(0.14)
+				sb.bg_color = Color("c9993f").darkened(0.16)
 			elif state == "disabled":
-				sb.bg_color = Color(ACC, 0.40)
-		else:
-			sb.bg_color = Color(1, 1, 1, 0.14 if state == "hover" else (0.05 if state != "pressed" else 0.22))
-			sb.border_color = UI_LINE
+				sb.bg_color = Color(0.79, 0.60, 0.25, 0.40)
+			sb.border_color = Color("7a5a22")
 			sb.set_border_width_all(1)
-		sb.set_corner_radius_all(8)
-		sb.content_margin_left = 16
-		sb.content_margin_right = 16
-		sb.content_margin_top = 8
-		sb.content_margin_bottom = 8
+		else:
+			sb.bg_color = Color(0.05, 0.085, 0.14, 0.92)
+			if state == "hover":
+				sb.bg_color = Color(0.11, 0.14, 0.20, 0.96)
+			elif state == "pressed":
+				sb.bg_color = Color(0.02, 0.04, 0.08, 0.96)
+			sb.border_color = UI_BRASS if state != "hover" else ACC
+			sb.set_border_width_all(1)
+		sb.set_corner_radius_all(3)
+		sb.content_margin_left = 10
+		sb.content_margin_right = 10
+		sb.content_margin_top = 4
+		sb.content_margin_bottom = 4
 		b.add_theme_stylebox_override(state, sb)
-	var fc := Color("1b1405") if primary else UI_TEXT
+	var fc := UI_INK if primary else UI_TEXT
 	for cn in ["font_color", "font_hover_color", "font_pressed_color", "font_focus_color", "font_disabled_color"]:
 		b.add_theme_color_override(cn, fc)
-	_hover_fx(b, 1.04)
+	if ui_bold_font != null:
+		b.add_theme_font_override("font", ui_bold_font)
+	_hover_fx(b, 1.03)
 
 
 func _style_card(b: Button, selected: bool) -> void:
@@ -7429,27 +7801,27 @@ func _style_card(b: Button, selected: bool) -> void:
 	b.set_meta("sel", selected)
 	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
 		var sb := StyleBoxFlat.new()
-		var base := Color(0.075, 0.120, 0.165, 0.96)
+		var base := Color(0.055, 0.09, 0.15, 0.96)
 		if selected:
-			base = Color(0.17, 0.15, 0.09, 0.97)
+			base = UI_BURGUNDY
 		if state == "hover":
 			base = base.lightened(0.10)
 		elif state == "pressed":
 			base = base.darkened(0.10)
 		sb.bg_color = base
-		sb.set_corner_radius_all(9)
+		sb.set_corner_radius_all(3)
 		sb.set_border_width_all(2 if selected else 1)
-		sb.border_color = ACC if selected else (Color(1, 1, 1, 0.22) if state == "hover" else UI_LINE)
+		sb.border_color = ACC if selected else (ACC if state == "hover" else UI_BRASS)
 		if selected:
-			sb.shadow_color = Color(ACC, 0.28)
-			sb.shadow_size = 8
+			sb.shadow_color = Color(ACC, 0.22)
+			sb.shadow_size = 6
 		b.add_theme_stylebox_override(state, sb)
 
 
 # HUD stat: thin coloured bar, small caps title, big value and (optionally) a small rate on the right.
 func _stat(v: VBoxContainer, title: String, accent: Color = ACC) -> Label:
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
+	row.add_theme_constant_override("separation", 6)
 	var bar := ColorRect.new()
 	bar.color = accent
 	bar.custom_minimum_size = Vector2(3, 0)
@@ -7459,18 +7831,22 @@ func _stat(v: VBoxContainer, title: String, accent: Color = ACC) -> Label:
 	col.add_theme_constant_override("separation", -2)
 	var s := Label.new()
 	s.text = title.to_upper()
-	s.add_theme_font_size_override("font_size", 11)
+	s.add_theme_font_size_override("font_size", 10)
 	s.add_theme_color_override("font_color", UI_MUTED)
+	if ui_title_font != null:
+		s.add_theme_font_override("font", ui_title_font)
 	col.add_child(s)
 	var line := HBoxContainer.new()
-	line.add_theme_constant_override("separation", 8)
+	line.add_theme_constant_override("separation", 6)
 	var l := Label.new()
 	l.text = "-"
-	l.add_theme_font_size_override("font_size", 22)
+	l.add_theme_font_size_override("font_size", 16)
+	if ui_bold_font != null:
+		l.add_theme_font_override("font", ui_bold_font)
 	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	line.add_child(l)
 	var r := Label.new()
-	r.add_theme_font_size_override("font_size", 12)
+	r.add_theme_font_size_override("font_size", 10)
 	r.add_theme_color_override("font_color", UI_GOOD)
 	r.size_flags_vertical = Control.SIZE_SHRINK_END
 	line.add_child(r)
@@ -7523,7 +7899,7 @@ func _panel_fade(p: Control) -> void:
 # One look for every progress bar (HUD troop bar, lobby fill bar).
 func _style_bar(bar: ProgressBar, fill_col: Color, radius: int) -> void:
 	var bg := StyleBoxFlat.new()
-	bg.bg_color = Color(1, 1, 1, 0.10)
+	bg.bg_color = Color(0.85, 0.67, 0.31, 0.14)
 	bg.set_corner_radius_all(radius)
 	var fl := StyleBoxFlat.new()
 	fl.bg_color = fill_col
@@ -7538,12 +7914,14 @@ func _small_label(text: String, size: int, col: Color) -> Label:
 	l.add_theme_font_size_override("font_size", size)
 	l.add_theme_color_override("font_color", col)
 	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if ui_title_font != null and text.length() > 3 and text == text.to_upper() and text != text.to_lower():
+		l.add_theme_font_override("font", ui_title_font)   # ALL-CAPS headings (LEADERBOARD, ATTACKS, LANDGRAB ...) are set in Baskerville
 	return l
 
 
 func _make_card(t: String, hotkey: int) -> Dictionary:
 	var b := Button.new()
-	b.custom_minimum_size = Vector2(98, 100)
+	b.custom_minimum_size = Vector2(64, 62)   # _compact_ui() sets the real size (touch / narrow windows)
 	b.tooltip_text = BUILD_TIP[t]
 	b.focus_mode = Control.FOCUS_NONE
 	b.pressed.connect(_toggle_build.bind(t))
@@ -7557,26 +7935,28 @@ func _make_card(t: String, hotkey: int) -> Dictionary:
 	var ic := BldIcon.new()
 	ic.main = self
 	ic.kind = t
-	ic.custom_minimum_size = Vector2(0, 46)
+	ic.custom_minimum_size = Vector2(0, 26)
 	ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	v.add_child(ic)
-	var nm := _small_label(BUILD_LABEL[t], 14, UI_TEXT)
+	var nm := _small_label(CARD_SHORT.get(t, BUILD_LABEL[t]), 10, UI_TEXT)
 	nm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	nm.clip_text = true
 	v.add_child(nm)
-	var pr := _small_label("", 13, ACC)
+	var pr := _small_label("", 10, ACC)
 	pr.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pr.clip_text = true
 	v.add_child(pr)
 	# small hotkey badge top-left, owned count top-right (primary info stays the name and the price)
-	var hk := _small_label(str(hotkey), 11, UI_MUTED)
-	hk.position = Vector2(9, 5)
+	var hk := _small_label(str(hotkey), 9, UI_MUTED)
+	hk.position = Vector2(5, 2)
 	b.add_child(hk)
-	var cn := _small_label("", 12, ACC)
+	var cn := _small_label("", 10, ACC)
 	cn.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	cn.anchor_left = 1.0
 	cn.anchor_right = 1.0
-	cn.offset_left = -40.0
-	cn.offset_right = -9.0
-	cn.offset_top = 4.0
+	cn.offset_left = -30.0
+	cn.offset_right = -5.0
+	cn.offset_top = 2.0
 	b.add_child(cn)
 	_style_card(b, false)
 	return {"btn": b, "price": pr, "count": cn}
@@ -7584,29 +7964,30 @@ func _make_card(t: String, hotkey: int) -> Dictionary:
 
 func _build_lobby_ui(root: Control) -> void:
 	var bg := ColorRect.new()
-	bg.color = Color(0.04, 0.11, 0.16)
+	bg.color = Color(0.032, 0.062, 0.105)
 	root.add_child(bg)
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	var cc := CenterContainer.new()
 	root.add_child(cc)
 	cc.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 14)
+	col.add_theme_constant_override("separation", 8)
 	cc.add_child(col)
-	var title := _small_label("LANDGRAB", 46, ACC)
+	var title := _small_label("LANDGRAB", 40, ACC)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(title)
-	var sub := _small_label("Public lobbies  -  a new map every 2 minutes", 15, UI_MUTED)
+	col.add_child(HistRule.new())
+	var sub := _small_label("Public lobbies  -  a new map every 2 minutes", 12, UI_MUTED)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(sub)
 	var card := _panel()
-	card.custom_minimum_size = Vector2(780, 0)
+	card.custom_minimum_size = Vector2(620, 0)
 	col.add_child(card)
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 20)
+	row.add_theme_constant_override("separation", 14)
 	card.add_child(row)
 	preview_rect = TextureRect.new()
-	preview_rect.custom_minimum_size = Vector2(380, 228)
+	preview_rect.custom_minimum_size = Vector2(290, 174)
 	preview_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	preview_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	preview_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
@@ -7615,73 +7996,85 @@ func _build_lobby_ui(root: Control) -> void:
 	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	right.add_theme_constant_override("separation", 8)
 	row.add_child(right)
-	lb_map = _small_label("", 30, UI_TEXT)
+	lb_map = _small_label("", 22, UI_TEXT)
+	if ui_title_font != null:
+		lb_map.add_theme_font_override("font", ui_title_font)
 	right.add_child(lb_map)
-	lb_info = _small_label("", 13, UI_MUTED)
+	lb_info = _small_label("", 11, UI_MUTED)
 	right.add_child(lb_info)
-	lb_players = _small_label("", 15, UI_TEXT)
+	lb_players = _small_label("", 12, UI_TEXT)
 	right.add_child(lb_players)
 	lb_bar = ProgressBar.new()
 	lb_bar.show_percentage = false
-	lb_bar.custom_minimum_size = Vector2(0, 14)
+	lb_bar.custom_minimum_size = Vector2(0, 10)
 	_style_bar(lb_bar, ACC, 6)
 	right.add_child(lb_bar)
-	lb_time = _small_label("", 24, ACC)
+	lb_time = _small_label("", 18, ACC)
 	right.add_child(lb_time)
-	var hint := _small_label("Starts right away when every slot is filled.", 12, UI_MUTED)
+	var hint := _small_label("Starts right away when every slot is filled.", 10, UI_MUTED)
 	right.add_child(hint)
 	var sp := Control.new()
 	sp.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	right.add_child(sp)
 	lb_join = Button.new()
-	lb_join.custom_minimum_size = Vector2(0, 52)
-	lb_join.add_theme_font_size_override("font_size", 20)
+	lb_join.custom_minimum_size = Vector2(0, 38)
+	lb_join.add_theme_font_size_override("font_size", 16)
 	_style_button(lb_join)
 	lb_join.pressed.connect(_lobby_join)
 	right.add_child(lb_join)
 	lb_spec = Button.new()
 	lb_spec.text = "Spectate  (watch the bots play)"
-	lb_spec.custom_minimum_size = Vector2(0, 40)
+	lb_spec.custom_minimum_size = Vector2(0, 30)
 	_style_button(lb_spec, false)
 	lb_spec.pressed.connect(_lobby_spectate)
 	right.add_child(lb_spec)
-	lb_next = _small_label("", 14, UI_MUTED)
+	lb_next = _small_label("", 11, UI_MUTED)
 	lb_next.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(lb_next)
-	lb_note = _small_label("", 13, Color("e8a95f"))
+	lb_note = _small_label("", 11, Color("e8a95f"))
 	lb_note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	col.add_child(lb_note)
 	# online play: your name, a room name your friends also type, and the relay server's address
-	var orow := HBoxContainer.new()
-	orow.alignment = BoxContainer.ALIGNMENT_CENTER
-	orow.add_theme_constant_override("separation", 8)
+	var orow := HFlowContainer.new()   # wraps onto a second line when the screen is narrow (phones) instead of running off the edge
+	orow.alignment = FlowContainer.ALIGNMENT_CENTER
+	orow.add_theme_constant_override("h_separation", 8)
+	orow.add_theme_constant_override("v_separation", 8)
 	col.add_child(orow)
+	var eh := 46 if _mobile_browser() else 32   # bigger touch targets on phones
 	net_name_edit = LineEdit.new()
 	net_name_edit.placeholder_text = "Your name"
 	net_name_edit.text = "Player"
 	net_name_edit.max_length = 16
-	net_name_edit.custom_minimum_size = Vector2(150, 42)
+	net_name_edit.custom_minimum_size = Vector2(120, eh)
 	orow.add_child(net_name_edit)
+	_mobile_edit(net_name_edit, "Your name")
 	net_room_edit = LineEdit.new()
 	net_room_edit.placeholder_text = "Private room code"
 	net_room_edit.text = ""
 	net_room_edit.max_length = 16
-	net_room_edit.custom_minimum_size = Vector2(110, 42)
+	net_room_edit.custom_minimum_size = Vector2(110, eh)
 	orow.add_child(net_room_edit)
+	_mobile_edit(net_room_edit, "Private room code")
+	var room_paste := _paste_button(net_room_edit, "Private room code", eh)
+	orow.add_child(room_paste)
 	net_server_edit = LineEdit.new()
 	net_server_edit.placeholder_text = "wss://server address"
 	net_server_edit.text = DEFAULT_SERVER
-	net_server_edit.custom_minimum_size = Vector2(300, 42)
+	net_server_edit.custom_minimum_size = Vector2(230, eh)
+	net_server_edit.virtual_keyboard_type = LineEdit.KEYBOARD_TYPE_URL
 	orow.add_child(net_server_edit)
+	_mobile_edit(net_server_edit, "Server address (wss://...)")
+	var server_paste := _paste_button(net_server_edit, "Server address (wss://...)", eh)
+	orow.add_child(server_paste)
 	net_btn = Button.new()
 	net_btn.text = "Private room"
-	net_btn.custom_minimum_size = Vector2(160, 42)
+	net_btn.custom_minimum_size = Vector2(120, eh)
 	_style_button(net_btn)
 	net_btn.pressed.connect(_net_button)
 	orow.add_child(net_btn)
 	net_map_btn = Button.new()
 	net_map_btn.text = "Change map"
-	net_map_btn.custom_minimum_size = Vector2(130, 42)
+	net_map_btn.custom_minimum_size = Vector2(100, eh)
 	net_map_btn.visible = false
 	_style_button(net_map_btn)
 	net_map_btn.pressed.connect(_net_next_map)
@@ -7689,22 +8082,104 @@ func _build_lobby_ui(root: Control) -> void:
 	_net_load_settings()
 
 
+# ---- text input on phones / tablets (web export) ----
+# A browser only opens the on-screen keyboard (and the paste menu) when a text field is focused INSIDE the tap itself. Godot's canvas
+# handles the tap one frame later, so on iPhone and Android the keyboard never appears. A phone browser therefore uses the browser's own
+# input box (window.prompt): it always shows the keyboard and has a native paste option. Desktop and native builds are untouched.
+func _mobile_browser() -> bool:
+	if mob_cache < 0:
+		mob_cache = 0
+		if OS.has_feature("web"):
+			if OS.has_feature("web_android") or OS.has_feature("web_ios"):
+				mob_cache = 1
+			else:
+				var r: Variant = JavaScriptBridge.eval("(/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1))")
+				mob_cache = 1 if (r != null and bool(r)) else 0
+	return mob_cache == 1
+
+
+func _mobile_edit(le: LineEdit, title: String) -> void:
+	if not _mobile_browser():
+		return
+	le.virtual_keyboard_enabled = false   # Godot's own keyboard request cannot work here (see above)
+	le.focus_entered.connect(func(): _mobile_prompt.call_deferred(le, title))
+
+
+func _mobile_prompt(le: LineEdit, title: String) -> void:
+	le.release_focus()
+	var r: Variant = JavaScriptBridge.eval("window.prompt(%s, %s)" % [JSON.stringify(title), JSON.stringify(le.text)])
+	if r == null:   # cancelled
+		return
+	var txt := String(r).strip_edges()
+	if le.max_length > 0:
+		txt = txt.left(le.max_length)
+	le.text = txt
+	le.caret_column = txt.length()
+	le.text_changed.emit(txt)
+
+
+# "Paste" button: reads the clipboard (browser asks for permission once); if the browser refuses, the input box opens so you can paste there.
+func _paste_button(le: LineEdit, title: String, h: int) -> Button:
+	var b := Button.new()
+	b.text = "Paste"
+	b.custom_minimum_size = Vector2(54, h)
+	b.focus_mode = Control.FOCUS_NONE
+	_style_button(b, false)
+	b.pressed.connect(_paste_into.bind(le, title))
+	return b
+
+
+func _paste_into(le: LineEdit, title: String) -> void:
+	if not OS.has_feature("web"):
+		le.text = DisplayServer.clipboard_get().strip_edges()
+		le.text_changed.emit(le.text)
+		return
+	paste_target = le
+	var nav: Variant = JavaScriptBridge.get_interface("navigator")   # untyped on purpose: JavaScript objects are called dynamically
+	var clip: Variant = null
+	if nav != null:
+		clip = nav.clipboard
+	if clip == null:
+		_mobile_prompt(le, title)
+		return
+	if paste_ok_cb == null:
+		paste_ok_cb = JavaScriptBridge.create_callback(_on_js_paste)
+		paste_err_cb = JavaScriptBridge.create_callback(_on_js_paste_denied)
+	clip.readText().then(paste_ok_cb, paste_err_cb)
+
+
+func _on_js_paste(args: Array) -> void:
+	if paste_target == null or args.is_empty():
+		return
+	var txt := String(args[0]).strip_edges()
+	if paste_target.max_length > 0:
+		txt = txt.left(paste_target.max_length)
+	paste_target.text = txt
+	paste_target.caret_column = txt.length()
+	paste_target.text_changed.emit(txt)
+
+
+func _on_js_paste_denied(_args: Array) -> void:
+	if paste_target != null:
+		_mobile_prompt.call_deferred(paste_target, "Paste here")
+
+
 func _build_ui() -> void:
 	var cl := CanvasLayer.new()
 	add_child(cl)
 
 	hud = _panel()
-	hud.custom_minimum_size = Vector2(196, 0)
+	hud.custom_minimum_size = Vector2(128, 0)
 	var hv := VBoxContainer.new()
 	hud.add_child(hv)
-	hv.add_theme_constant_override("separation", 9)
+	hv.add_theme_constant_override("separation", 3)
 	troops_l = _stat(hv, "Troops", BLUE)
 	troops_rate = _last_rate_lbl
 	troops_bar = ProgressBar.new()
 	troops_bar.show_percentage = false
 	troops_bar.min_value = 0.0
 	troops_bar.max_value = 1.0
-	troops_bar.custom_minimum_size = Vector2(0, 5)
+	troops_bar.custom_minimum_size = Vector2(0, 3)
 	_style_bar(troops_bar, BLUE, 3)
 	hv.add_child(troops_bar)
 	share_l = _stat(hv, "Territory", UI_GOOD)
@@ -7717,32 +8192,32 @@ func _build_ui() -> void:
 	info_panel = _panel()
 	info_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var ih := HBoxContainer.new()
-	ih.add_theme_constant_override("separation", 16)
+	ih.add_theme_constant_override("separation", 9)
 	info_panel.add_child(ih)
 	info_sw = ColorRect.new()
-	info_sw.custom_minimum_size = Vector2(14, 14)
+	info_sw.custom_minimum_size = Vector2(10, 10)
 	info_sw.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	ih.add_child(info_sw)
-	info_name = _small_label("", 18, Color.WHITE)
+	info_name = _small_label("", 13, Color.WHITE)
 	ih.add_child(info_name)
-	info_ally = _small_label("", 13, UI_GOOD)
+	info_ally = _small_label("", 10, UI_GOOD)
 	ih.add_child(info_ally)
-	info_bld = _small_label("", 13, UI_MUTED)
+	info_bld = _small_label("", 10, UI_MUTED)
 	ih.add_child(info_bld)
-	info_troops = _small_label("", 16, UI_TEXT)
+	info_troops = _small_label("", 12, UI_TEXT)
 	ih.add_child(info_troops)
-	info_gold = _small_label("", 13, ACC)
+	info_gold = _small_label("", 10, ACC)
 	ih.add_child(info_gold)
 	info_panel.visible = false
 	cl.add_child(info_panel)
 
 	# right-click menu
 	ctx_panel = _panel()
-	ctx_panel.custom_minimum_size = Vector2(210, 0)
+	ctx_panel.custom_minimum_size = Vector2(150, 0)
 	var cvb := VBoxContainer.new()
-	cvb.add_theme_constant_override("separation", 6)
+	cvb.add_theme_constant_override("separation", 3)
 	ctx_panel.add_child(cvb)
-	ctx_title = _small_label("", 16, Color.WHITE)
+	ctx_title = _small_label("", 12, Color.WHITE)
 	cvb.add_child(ctx_title)
 	ctx_make = _ctx_btn("Make alliance", UI_GOOD)
 	ctx_make.pressed.connect(_ctx_do_make)
@@ -7763,14 +8238,14 @@ func _build_ui() -> void:
 	cl.add_child(ctx_panel)
 
 	lb_panel = _panel()
-	lb_panel.custom_minimum_size = Vector2(176, 0)
+	lb_panel.custom_minimum_size = Vector2(116, 0)
 	lb_box = VBoxContainer.new()
 	lb_panel.add_child(lb_box)
 	cl.add_child(lb_panel)
 
 	ctl = _panel()
 	var cv := HBoxContainer.new()   # ONE horizontal bar along the bottom edge: the cards left to right, the troop slider at the end
-	cv.add_theme_constant_override("separation", 8)
+	cv.add_theme_constant_override("separation", 4)
 	ctl.add_child(cv)
 	var crow := cv
 	var hk := 1
@@ -7784,8 +8259,8 @@ func _build_ui() -> void:
 			arrow_btn.focus_mode = Control.FOCUS_NONE
 			arrow_btn.tooltip_text = "Warships and water mines (need a port)"
 			card["btn"].add_child(arrow_btn)
-			arrow_btn.position = Vector2(33, 2)
-			arrow_btn.size = Vector2(34, 18)
+			arrow_btn.position = Vector2(19, 1)
+			arrow_btn.size = Vector2(26, 14)
 			_style_arrow(arrow_btn)
 			arrow_btn.pressed.connect(_toggle_sub)
 	# second section: Bomb Launcher (arrow = the bombs) and SAM Site
@@ -7801,19 +8276,19 @@ func _build_ui() -> void:
 			launcher_arrow.focus_mode = Control.FOCUS_NONE
 			launcher_arrow.tooltip_text = "Bombs: Small Bomb, Nuke and Mega Bomb (fired from a Bomb Launcher)"
 			dcard["btn"].add_child(launcher_arrow)
-			launcher_arrow.position = Vector2(33, 2)
-			launcher_arrow.size = Vector2(34, 18)
+			launcher_arrow.position = Vector2(19, 1)
+			launcher_arrow.size = Vector2(26, 14)
 			_style_arrow(launcher_arrow)
 			launcher_arrow.pressed.connect(_toggle_nuke)
 	var sbox := VBoxContainer.new()
-	sbox.custom_minimum_size = Vector2(200, 0)
+	sbox.custom_minimum_size = Vector2(150, 0)
 	sbox.alignment = BoxContainer.ALIGNMENT_CENTER
-	sbox.add_theme_constant_override("separation", 6)
+	sbox.add_theme_constant_override("separation", 2)
 	cv.add_child(sbox)
 	bar_sbox = sbox
 	pct_l = Label.new()
-	pct_l.text = "Send 20% of troops per attack"
-	pct_l.add_theme_font_size_override("font_size", 12)
+	pct_l.text = "Send 20% per attack"
+	pct_l.add_theme_font_size_override("font_size", 10)
 	pct_l.add_theme_color_override("font_color", UI_MUTED)
 	sbox.add_child(pct_l)
 	slider = HSlider.new()
@@ -7821,14 +8296,14 @@ func _build_ui() -> void:
 	slider.max_value = 100
 	slider.step = 1
 	slider.value = 20
-	slider.custom_minimum_size = Vector2(0, 22)
-	slider.value_changed.connect(func(v): pct_l.text = "Send %d%% of troops per attack" % int(v))
+	slider.custom_minimum_size = Vector2(0, 16)
+	slider.value_changed.connect(func(v): pct_l.text = "Send %d%% per attack" % int(v))
 	sbox.add_child(slider)
 	cl.add_child(ctl)
 
 	sub_panel = _panel()
 	var sh := HBoxContainer.new()
-	sh.add_theme_constant_override("separation", 8)
+	sh.add_theme_constant_override("separation", 4)
 	sub_panel.add_child(sh)
 	var hk2 := 4
 	for t in SEA_ORDER:
@@ -7842,7 +8317,7 @@ func _build_ui() -> void:
 
 	nuke_panel = _panel()
 	var nh := HBoxContainer.new()
-	nh.add_theme_constant_override("separation", 8)
+	nh.add_theme_constant_override("separation", 4)
 	nuke_panel.add_child(nh)
 	var hk3 := 8
 	for t in NUKE_ORDER:
@@ -7855,7 +8330,7 @@ func _build_ui() -> void:
 	cl.add_child(nuke_panel)
 
 	atk_panel = _panel()
-	atk_panel.custom_minimum_size = Vector2(260, 0)
+	atk_panel.custom_minimum_size = Vector2(190, 0)
 	atk_box = VBoxContainer.new()
 	atk_panel.add_child(atk_box)
 	atk_panel.visible = false
@@ -7868,8 +8343,8 @@ func _build_ui() -> void:
 		var zb := Button.new()
 		zb.text = spec[0]
 		_style_button(zb, false)
-		zb.add_theme_font_size_override("font_size", 18)
-		zb.custom_minimum_size = Vector2(40, 36)
+		zb.add_theme_font_size_override("font_size", 14)
+		zb.custom_minimum_size = Vector2(30, 26)
 		zb.focus_mode = Control.FOCUS_NONE   # Space/Enter/arrows must never trigger zoom after a click
 		zb.tooltip_text = "Zoom in" if float(spec[1]) > 1.0 else "Zoom out"
 		var f: float = spec[1]
@@ -7878,10 +8353,10 @@ func _build_ui() -> void:
 	cl.add_child(zoom_panel)
 	spec_panel = _panel()
 	var spec_row := HBoxContainer.new()
-	spec_row.add_theme_constant_override("separation", 8)
+	spec_row.add_theme_constant_override("separation", 4)
 	spec_panel.add_child(spec_row)
-	spec_label = _small_label("Spectating", 14, UI_TEXT)
-	spec_label.custom_minimum_size = Vector2(300, 0)
+	spec_label = _small_label("Spectating", 12, UI_TEXT)
+	spec_label.custom_minimum_size = Vector2(170, 0)
 	spec_row.add_child(spec_label)
 	for sp in [1, 2, 4, 8]:
 		var sb := Button.new()
@@ -7901,24 +8376,25 @@ func _build_ui() -> void:
 	msg_label = Label.new()
 	msg_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	msg_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	msg_label.custom_minimum_size = Vector2(420, 0)
+	msg_label.custom_minimum_size = Vector2(300, 0)
+	msg_label.add_theme_font_size_override("font_size", 12)
 	msg_panel.add_child(msg_label)
 	msg_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	cl.add_child(msg_panel)
 
 	end_panel = _panel()
-	end_panel.custom_minimum_size = Vector2(280, 0)
+	end_panel.custom_minimum_size = Vector2(230, 0)
 	var ev := VBoxContainer.new()
 	ev.alignment = BoxContainer.ALIGNMENT_CENTER
-	ev.add_theme_constant_override("separation", 14)
+	ev.add_theme_constant_override("separation", 8)
 	end_panel.add_child(ev)
 	end_label = Label.new()
 	end_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	end_label.add_theme_font_size_override("font_size", 22)
+	end_label.add_theme_font_size_override("font_size", 18)
 	ev.add_child(end_label)
 	var again := Button.new()
 	again.text = "Back to lobby"
-	again.custom_minimum_size = Vector2(0, 44)
+	again.custom_minimum_size = Vector2(0, 34)
 	_style_button(again)
 	again.pressed.connect(enter_lobby)
 	ev.add_child(again)
@@ -7936,6 +8412,8 @@ func _build_ui() -> void:
 	for fp in [info_panel, ctx_panel, atk_panel, sub_panel, nuke_panel, msg_panel, end_panel]:
 		(fp as Control).visibility_changed.connect(_panel_fade.bind(fp))
 	get_viewport().size_changed.connect(_compact_ui)
+	get_window().size_changed.connect(_desktop_scale)
+	_desktop_scale.call_deferred()
 
 
 func _layout() -> void:
@@ -7952,7 +8430,7 @@ func _layout() -> void:
 	zoom_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	spec_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_MINSIZE, UI_MARGIN)
 	spec_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	msg_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM, Control.PRESET_MODE_MINSIZE, 112)
+	msg_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM, Control.PRESET_MODE_MINSIZE, 76)
 	msg_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	msg_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	end_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER, Control.PRESET_MODE_MINSIZE, 0)
@@ -7994,7 +8472,7 @@ var pend_tile := -1                # tile waiting for the check button (spawn po
 var layout_done := false
 var safe_cur := Vector4.ZERO       # safe-area insets (left, top, right, bottom) already applied, in UI units
 var safe_hooked := false
-var atk_btn_px := 28.0             # size of the X / swords buttons in the attacks list (bigger on touch)
+var atk_btn_px := 20.0             # size of the X / swords buttons in the attacks list (bigger on touch)
 
 
 # Round-ish icon button for the touch column (check / cross / locate), drawn in code like IconBtn.
@@ -8072,11 +8550,7 @@ func _touch_adapt_ui() -> void:
 	atk_btn_px = 40.0
 	for zb in (zoom_panel.get_child(0) as HBoxContainer).get_children():
 		(zb as Control).custom_minimum_size = Vector2(54, 48)
-	# the little sea-units arrow on the Port card
-	arrow_btn.position = Vector2(29, 0)
-	arrow_btn.size = Vector2(40, 28)
-	launcher_arrow.position = Vector2(29, 0)
-	launcher_arrow.size = Vector2(40, 28)
+	_compact_ui(true)   # fingertip-sized cards and the little arrows on the Port / Launcher cards
 	# attack-percentage slider: taller grab zone + a big round handle
 	slider.custom_minimum_size = Vector2(0, 38)
 	for nm in ["grabber", "grabber_highlight"]:
@@ -8545,15 +9019,41 @@ func _draw_bld_lod(kind: String, pos: Vector2, s: float, c: Color) -> void:
 
 
 # Narrow windows / small phones: the bottom bar (five cards + the troop slider) would run into the zoom buttons, so shrink it.
-func _compact_ui() -> void:
+# Desktop / browser: keep the UI at a sensible physical size. Without this a big window (full screen on a 1080p / 1440p monitor) scaled
+# every panel up with the window and the UI ate the board. The factor is applied on top of the project's 1280x720 stretch, so
+# the UI grows only slowly with the window (about 0.9x at 720p, 1.2x at 1080p) while the board gets all the extra room.
+# Touch devices keep their own scale (_touch_scale).
+func _desktop_scale() -> void:
+	if touch_mode:
+		return
+	var win := Vector2(get_window().size)
+	if win.x < 100.0 or win.y < 100.0:
+		return
+	var stretch := minf(win.x / 1280.0, win.y / 720.0)
+	var want := clampf(minf(win.x / 1500.0, win.y / 880.0), 0.9, 1.3)
+	var f := want / stretch
+	if absf(f - get_window().content_scale_factor) > 0.01:
+		get_window().content_scale_factor = f
+
+
+func _compact_ui(force: bool = false) -> void:
 	if cards.is_empty() or bar_sbox == null:
 		return
-	var compact := get_viewport_rect().size.x < 980.0
-	if compact_init and compact == compact_cur:
+	var compact := get_viewport_rect().size.x < 900.0
+	if compact_init and compact == compact_cur and not force:
 		return
 	compact_init = true
 	compact_cur = compact
-	var csz := Vector2(90, 88) if compact else Vector2(98, 100)
+	var csz := Vector2(64, 62)
+	if touch_mode:
+		csz = Vector2(86, 82)      # fingertip-sized cards
+	elif compact:
+		csz = Vector2(56, 56)
 	for t in cards:
 		((cards[t] as Dictionary)["btn"] as Control).custom_minimum_size = csz
-	bar_sbox.custom_minimum_size = Vector2(150 if compact else 200, 0)
+	var asz := Vector2(40, 28) if touch_mode else Vector2(26, 14)
+	for ab in [arrow_btn, launcher_arrow]:
+		if ab != null:
+			(ab as Control).size = asz
+			(ab as Control).position = Vector2((csz.x - asz.x) * 0.5, 1.0)
+	bar_sbox.custom_minimum_size = Vector2(104 if compact else 150, 0)
